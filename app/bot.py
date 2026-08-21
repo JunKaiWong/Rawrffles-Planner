@@ -15,6 +15,7 @@ that happened while nobody was watching can still be traced afterwards.
 
 import logging
 import logging.handlers
+import sys
 from pathlib import Path
 
 from telegram import Update
@@ -116,7 +117,15 @@ def setup_logging(log_file: Path = LOG_FILE) -> None:
         "%(asctime)s %(levelname)-8s %(name)s - %(message)s"
     )
 
-    console = logging.StreamHandler()
+    # Captions routinely contain emoji, which the Windows console's default
+    # cp1252 codec cannot encode - without this, logging one raises
+    # UnicodeEncodeError and takes the handler down with it.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):  # pragma: no cover - non-standard stdout
+        pass
+
+    console = logging.StreamHandler(sys.stdout)
     console.setFormatter(formatter)
 
     # 1 MB per file, five generations kept.

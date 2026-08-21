@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
+# Columns added after the first release. schema.sql creates them for new
+# databases; existing ones are patched by _migrate(), since
+# CREATE TABLE IF NOT EXISTS silently skips an existing table.
+_EXPECTED_LINK_COLUMNS = {
+    "canonical_url": "TEXT",
+    "title": "TEXT",
+    "location": "TEXT",
+}
+
 
 def utc_now_iso() -> str:
     """Timestamp format used for every date/time column."""
@@ -41,14 +50,28 @@ def connect(db_path: str | Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing from an older database. Additive only - no data is
+    rewritten or dropped, so this is safe to run on every startup."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(links)")}
+    for column, column_type in _EXPECTED_LINK_COLUMNS.items():
+        if column not in existing:
+            logger.info("migrating: adding links.%s (%s)", column, column_type)
+            conn.execute(f"ALTER TABLE links ADD COLUMN {column} {column_type}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_links_canonical ON links (canonical_url)"
+    )
+
+
 def init_db(db_path: str | Path) -> None:
-    """Create tables if absent. Safe to call on every startup."""
+    """Create tables if absent, then apply additive migrations."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("initialising database at %s", path.resolve())
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     with connect(path) as conn:
         conn.executescript(schema)
+        _migrate(conn)
         tables = [
             row["name"]
             for row in conn.execute(
@@ -59,13 +82,37 @@ def init_db(db_path: str | Path) -> None:
 
 
 def find_link_by_url(db_path: str | Path, url: str) -> sqlite3.Row | None:
-    """Return an existing row for this exact URL, if any."""
+    """Match on the URL exactly as pasted. Cheap pre-check before any network
+    call, so a link pasted twice verbatim never triggers extraction."""
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT id, url, platform, added_by, added_at FROM links WHERE url = ?",
             (url,),
         ).fetchone()
-    logger.debug("lookup url=%s -> %s", url, "hit" if row else "miss")
+    logger.debug("lookup by url=%s -> %s", url, "hit" if row else "miss")
+    return row
+
+
+def find_link_by_canonical_url(
+    db_path: str | Path, canonical_url: str
+) -> sqlite3.Row | None:
+    """Match on the resolved, normalised URL.
+
+    This is what catches the same post arriving via different share links or
+    with different tracking parameters. NULL never matches, which is correct:
+    an unresolved link is not known to be a duplicate of anything.
+    """
+    if not canonical_url:
+        return None
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, url, canonical_url, platform, added_by, added_at "
+            "FROM links WHERE canonical_url = ?",
+            (canonical_url,),
+        ).fetchone()
+    logger.debug(
+        "lookup by canonical_url=%s -> %s", canonical_url, "hit" if row else "miss"
+    )
     return row
 
 
@@ -74,28 +121,78 @@ def insert_link(
     url: str,
     platform: str,
     added_by: int,
+    canonical_url: str | None = None,
+    title: str | None = None,
+    caption: str | None = None,
+    location: str | None = None,
     added_at: str | None = None,
 ) -> int:
     """Insert a link and return its new id.
 
-    Only the intake columns are written; caption/tags/event dates stay NULL
-    until the extraction step exists.
+    `url` is the raw pasted URL and is always stored; every metadata field is
+    optional so a failed extraction still results in a saved link.
     """
     added_at = added_at or utc_now_iso()
     with connect(db_path) as conn:
         cursor = conn.execute(
-            "INSERT INTO links (url, platform, added_by, added_at) VALUES (?, ?, ?, ?)",
-            (url, platform, added_by, added_at),
+            "INSERT INTO links (url, canonical_url, platform, title, caption, "
+            "location, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (url, canonical_url, platform, title, caption, location, added_by, added_at),
         )
         link_id = int(cursor.lastrowid)
     logger.info(
-        "stored link id=%s platform=%s added_by=%s url=%s",
+        "stored link id=%s platform=%s added_by=%s url=%s canonical=%s "
+        "title=%r caption_len=%s location=%r",
         link_id,
         platform,
         added_by,
         url,
+        canonical_url,
+        (title or "")[:60],
+        len(caption) if caption else 0,
+        location,
     )
     return link_id
+
+
+def update_link_metadata(
+    db_path: str | Path,
+    link_id: int,
+    canonical_url: str | None = None,
+    title: str | None = None,
+    caption: str | None = None,
+    location: str | None = None,
+) -> None:
+    """Fill in metadata for an already-stored link (used to backfill rows saved
+    before extraction existed). Only non-None values overwrite."""
+    updates = {
+        "canonical_url": canonical_url,
+        "title": title,
+        "caption": caption,
+        "location": location,
+    }
+    updates = {k: v for k, v in updates.items() if v is not None}
+    if not updates:
+        logger.debug("no metadata to update for link id=%s", link_id)
+        return
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    with connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE links SET {assignments} WHERE id = ?",
+            (*updates.values(), link_id),
+        )
+    logger.info("updated link id=%s fields=%s", link_id, ", ".join(updates))
+
+
+def links_missing_metadata(db_path: str | Path) -> list[sqlite3.Row]:
+    """Rows stored before extraction ran, i.e. with no canonical URL yet."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, platform FROM links WHERE canonical_url IS NULL "
+            "ORDER BY id"
+        ).fetchall()
+    logger.info("%d link(s) missing metadata", len(rows))
+    return rows
 
 
 def count_links(db_path: str | Path) -> int:

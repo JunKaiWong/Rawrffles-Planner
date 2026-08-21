@@ -26,6 +26,9 @@ dist/
 *.db-journal
 *.db-wal
 *.db-shm
+# Backup copies taken before migrations: still full databases, so still secret.
+*.bak
+*.db.*
 
 # --- Test / lint / type-check caches ---
 # Machine-local, regenerated on every run, and huge in file count.

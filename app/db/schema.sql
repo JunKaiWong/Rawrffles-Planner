@@ -6,9 +6,12 @@
 
 CREATE TABLE IF NOT EXISTS links (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    url            TEXT    NOT NULL,
+    url            TEXT    NOT NULL,          -- exactly as pasted, always kept
+    canonical_url  TEXT,                      -- normalised dedup key, NULL if unresolved
     platform       TEXT    NOT NULL,          -- 'tiktok' | 'instagram'
-    caption        TEXT,                      -- filled by extraction later
+    title          TEXT,                      -- from yt-dlp
+    caption        TEXT,                      -- post description, from yt-dlp
+    location       TEXT,                      -- rarely set by yt-dlp; LLM fills later
     tags           TEXT,                      -- filled by extraction later
     added_by       INTEGER NOT NULL,          -- Telegram user id
     added_at       TEXT    NOT NULL,          -- ISO-8601 UTC
@@ -24,6 +27,14 @@ CREATE TABLE IF NOT EXISTS links (
 );
 
 -- Dedup lookups on intake, and the Mini App's To visit / Done split.
+--
+-- idx_links_canonical is created by database._migrate(), not here: on a
+-- pre-existing database CREATE TABLE IF NOT EXISTS skips the table above, so
+-- canonical_url does not exist yet at this point and indexing it would fail.
+-- The migration adds the column first, then the index.
+--
+-- canonical_url is deliberately not UNIQUE: it is NULL whenever resolution
+-- failed, and several NULLs must be allowed to coexist.
 CREATE INDEX IF NOT EXISTS idx_links_url  ON links (url);
 CREATE INDEX IF NOT EXISTS idx_links_done ON links (done);
 

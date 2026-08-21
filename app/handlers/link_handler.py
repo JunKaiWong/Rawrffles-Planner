@@ -1,21 +1,33 @@
-"""Detects TikTok/Instagram URLs in group messages and stores them.
+"""Detects TikTok/Instagram URLs in group messages, extracts metadata, stores.
 
-Part one of CLAUDE.md first session goal #3: capture URL, platform, sender and
-timestamp only. Caption/tag/date extraction (yt-dlp, LLM) comes later, so those
-columns stay NULL for now.
+Goal #3 of CLAUDE.md: capture the URL, run yt-dlp for title/caption/location,
+and record the canonical URL so the same post shared via different short links
+de-duplicates to one row.
 
-Per the project conventions this fails soft: if one URL in a message cannot be
-stored, the others are still saved and the user is told what happened, rather
-than the whole message being dropped.
+De-duplication runs in two stages, cheapest first:
+
+  1. exact match on the URL as pasted - no network call needed;
+  2. match on the canonical URL after resolution - catches vm./vt. share links
+     and differing tracking parameters.
+
+Per the project conventions this fails soft at every level: a link whose
+metadata cannot be extracted is still stored with its raw URL, and one link
+failing never costs the others in the same message.
 """
 
 import logging
 import re
 
 from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
-from app.db.database import find_link_by_url, insert_link
+from app.db.database import (
+    find_link_by_canonical_url,
+    find_link_by_url,
+    insert_link,
+)
+from app.services.extractor import extract_async
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +83,24 @@ def extract_links(text: str) -> list[tuple[str, str]]:
     return found
 
 
+def _platform_label(platform: str) -> str:
+    return PLATFORM_LABELS.get(platform, platform)
+
+
 def _describe(url: str, platform: str) -> str:
-    return f"{PLATFORM_LABELS.get(platform, platform)} - {url}"
+    return f"{_platform_label(platform)} - {url}"
+
+
+def _summarise_saved(link_id: int, platform: str, url: str, metadata) -> str:
+    """One confirmation entry: what was saved, and what we learned about it."""
+    headline = metadata.title or url
+    lines = [f"  #{link_id} {_platform_label(platform)} - {headline}"]
+    if metadata.location:
+        lines.append(f"     location: {metadata.location}")
+    if not metadata.ok:
+        # Be explicit rather than silently storing a bare URL.
+        lines.append("     (saved, but metadata could not be read)")
+    return "\n".join(lines)
 
 
 async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,35 +140,75 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     duplicates: list[str] = []
     failed: list[str] = []
 
+    # Extraction takes seconds, so show the typing indicator rather than
+    # leaving the group wondering whether the bot noticed.
+    try:
+        await message.chat.send_action(ChatAction.TYPING)
+    except Exception:  # noqa: BLE001 - cosmetic only
+        logger.debug("could not send typing action", exc_info=True)
+
     for url, platform in links:
         try:
+            # Stage 1: exact match on the pasted URL, before any network call.
             existing = find_link_by_url(db_path, url)
             if existing is not None:
                 logger.info(
-                    "duplicate url=%s already stored as id=%s (added_at=%s)",
+                    "duplicate (exact url) %s already stored as id=%s (added_at=%s)",
                     url,
                     existing["id"],
                     existing["added_at"],
                 )
-                duplicates.append(_describe(url, platform))
+                duplicates.append(f"  #{existing['id']} {_describe(url, platform)}")
                 continue
-            link_id = insert_link(db_path, url=url, platform=platform, added_by=added_by)
-            saved.append(f"#{link_id} {_describe(url, platform)}")
+
+            metadata = await extract_async(url)
+
+            # Stage 2: match on the resolved URL. Catches the same post arriving
+            # through a different share link or with other tracking parameters.
+            if metadata.canonical_url:
+                existing = find_link_by_canonical_url(db_path, metadata.canonical_url)
+                if existing is not None:
+                    logger.info(
+                        "duplicate (canonical) %s -> %s already stored as id=%s "
+                        "(originally pasted as %s)",
+                        url,
+                        metadata.canonical_url,
+                        existing["id"],
+                        existing["url"],
+                    )
+                    duplicates.append(
+                        f"  #{existing['id']} {_platform_label(platform)} - "
+                        f"same post as {existing['url']}"
+                    )
+                    continue
+
+            link_id = insert_link(
+                db_path,
+                url=url,
+                platform=platform,
+                added_by=added_by,
+                canonical_url=metadata.canonical_url,
+                title=metadata.title,
+                caption=metadata.caption,
+                location=metadata.location,
+            )
+            saved.append(_summarise_saved(link_id, platform, url, metadata))
         except Exception:
             # Never let one bad link kill the rest of the message.
             logger.exception("failed to store url=%s platform=%s", url, platform)
-            failed.append(_describe(url, platform))
+            failed.append(f"  {_describe(url, platform)}")
 
+    # Entries already carry their own indentation.
     lines: list[str] = []
     if saved:
         lines.append(f"Saved {len(saved)} link{'s' if len(saved) != 1 else ''}:")
-        lines.extend(f"  {item}" for item in saved)
+        lines.extend(saved)
     if duplicates:
         lines.append(f"Already saved ({len(duplicates)}):")
-        lines.extend(f"  {item}" for item in duplicates)
+        lines.extend(duplicates)
     if failed:
         lines.append(f"Could not save ({len(failed)}) - check the logs:")
-        lines.extend(f"  {item}" for item in failed)
+        lines.extend(failed)
 
     reply = "\n".join(lines)
     logger.info(
