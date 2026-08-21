@@ -1,0 +1,1 @@
+-- TODO: define links, dates, availability, plans tables (see CLAUDE.md schema section).

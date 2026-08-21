@@ -1,0 +1,53 @@
+# --- Secrets ---
+# Live credentials (bot token, chat ID, API keys). Never commit.
+.env
+.env.planner
+
+# --- Virtualenv ---
+# Thousands of installed packages, platform-specific binaries. Rebuild from
+# requirements.txt instead. Both names covered in case the venv gets recreated.
+venv/
+.venv/
+
+# --- Python bytecode / build output ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- SQLite ---
+# The database is local runtime state, not source. schema.sql is the tracked
+# artifact. The -journal/-wal/-shm files are transaction sidecars SQLite
+# creates alongside the db; committing them risks a corrupt-looking checkout.
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Test / lint / type-check caches ---
+# Machine-local, regenerated on every run, and huge in file count.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- VS Code ---
+# Editor-local settings and window layout. Ignored wholesale, with an opt-in
+# exception for files a team genuinely shares (see note below).
+.vscode/
+
+# --- OS cruft ---
+# Windows Explorer thumbnail/folder-metadata files, and .DS_Store for anyone
+# opening the repo on a Mac.
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# --- Logs ---
+*.log
