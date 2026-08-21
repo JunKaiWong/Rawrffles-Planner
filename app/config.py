@@ -23,6 +23,7 @@ class Settings:
     bot_token: str
     chat_id: int
     transport: str
+    allowed_user_ids: frozenset[int] = frozenset()
     webhook_url: str | None = None
     webhook_port: int = 8443
     webhook_secret: str | None = None
@@ -34,6 +35,27 @@ def _require(name: str, env_file: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is missing or empty in {env_file}")
     return value
+
+
+def _parse_user_ids(raw: str) -> frozenset[int]:
+    """Parse the comma-separated ALLOWED_USER_IDS list.
+
+    A malformed entry raises rather than being skipped: silently dropping an id
+    would quietly lock a real user out, and silently keeping a bad one would be
+    worse.
+    """
+    ids = set()
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            ids.add(int(chunk))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"ALLOWED_USER_IDS contains a non-numeric entry: {chunk!r}"
+            ) from exc
+    return frozenset(ids)
 
 
 def load_settings(env_file: str | None = None) -> Settings:
@@ -68,4 +90,5 @@ def load_settings(env_file: str | None = None) -> Settings:
         webhook_port=int(os.getenv("WEBHOOK_PORT") or 8443),
         webhook_secret=(os.getenv("WEBHOOK_SECRET") or "").strip() or None,
         db_path=Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db"),
+        allowed_user_ids=_parse_user_ids(os.getenv("ALLOWED_USER_IDS") or ""),
     )

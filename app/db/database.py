@@ -195,6 +195,87 @@ def links_missing_metadata(db_path: str | Path) -> list[sqlite3.Row]:
     return rows
 
 
+def list_links(db_path: str | Path) -> list[sqlite3.Row]:
+    """Every link, newest first. The Mini App splits these into To visit / Done
+    client-side, so both are returned in one call."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, canonical_url, platform, title, caption, location, "
+            "tags, added_by, added_at, done, done_at, done_by, rating, note, "
+            "photo_file_id, event_start, event_end, is_evergreen "
+            "FROM links ORDER BY added_at DESC, id DESC"
+        ).fetchall()
+    logger.info("listed %d link(s)", len(rows))
+    return rows
+
+
+def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, url, canonical_url, platform, title, caption, location, "
+            "tags, added_by, added_at, done, done_at, done_by, rating, note, "
+            "photo_file_id, event_start, event_end, is_evergreen "
+            "FROM links WHERE id = ?",
+            (link_id,),
+        ).fetchone()
+    logger.debug("get link id=%s -> %s", link_id, "hit" if row else "miss")
+    return row
+
+
+def update_link(
+    db_path: str | Path,
+    link_id: int,
+    changes: dict,
+    acting_user_id: int,
+) -> sqlite3.Row | None:
+    """Apply a partial update to a link and return the updated row.
+
+    `changes` holds only the fields the caller actually sent, so omitting a
+    field leaves it untouched while explicitly sending null clears it.
+
+    Marking done/undone also maintains done_at and done_by, which the caller
+    never sets directly - they record when it happened and who did it.
+    """
+    allowed_columns = {"done", "rating", "note"}
+    unknown = set(changes) - allowed_columns
+    if unknown:
+        # Guards against a typo'd field silently doing nothing, and keeps the
+        # column list here rather than in an f-string built from user input.
+        raise ValueError(f"cannot update unknown field(s): {sorted(unknown)}")
+
+    updates = dict(changes)
+    if "done" in updates:
+        if updates["done"]:
+            updates["done"] = 1
+            updates["done_at"] = utc_now_iso()
+            updates["done_by"] = acting_user_id
+        else:
+            updates["done"] = 0
+            updates["done_at"] = None
+            updates["done_by"] = None
+
+    if not updates:
+        logger.debug("no changes for link id=%s", link_id)
+        return get_link(db_path, link_id)
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            f"UPDATE links SET {assignments} WHERE id = ?",
+            (*updates.values(), link_id),
+        )
+        if cursor.rowcount == 0:
+            logger.info("update skipped: link id=%s not found", link_id)
+            return None
+    logger.info(
+        "updated link id=%s by user=%s fields=%s",
+        link_id,
+        acting_user_id,
+        ", ".join(updates),
+    )
+    return get_link(db_path, link_id)
+
+
 def count_links(db_path: str | Path) -> int:
     with connect(db_path) as conn:
         return int(conn.execute("SELECT COUNT(*) FROM links").fetchone()[0])
