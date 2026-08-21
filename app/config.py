@@ -26,6 +26,7 @@ class Settings:
     webhook_url: str | None = None
     webhook_port: int = 8443
     webhook_secret: str | None = None
+    db_path: Path = PROJECT_ROOT / "planner.db"
 
 
 def _require(name: str, env_file: str) -> str:
@@ -66,4 +67,5 @@ def load_settings(env_file: str | None = None) -> Settings:
         webhook_url=webhook_url,
         webhook_port=int(os.getenv("WEBHOOK_PORT") or 8443),
         webhook_secret=(os.getenv("WEBHOOK_SECRET") or "").strip() or None,
+        db_path=Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db"),
     )
