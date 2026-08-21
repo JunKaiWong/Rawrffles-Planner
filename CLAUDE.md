@@ -131,6 +131,27 @@ weekend only"). At intake, call the LLM to parse the caption into structured
 JSON `{title, location, event_start, event_end, is_evergreen}`. Do not attempt
 this with regex. This is a small, cheap call, separate from `plan_date()`.
 
+**TikTok photo/slideshow posts**: `yt-dlp` cannot extract these — it returns
+"Unsupported URL" and only the canonical URL is recoverable. Do NOT solve this
+by scraping slide image URLs from TikTok's page structure; that's fragile and
+sends the model irrelevant slides.
+
+Instead, the users screenshot the one slide that matters and send it to the
+group with the post URL in the photo's caption. One message carries both. The
+link handler already reads photo captions, so intake is unchanged. Store the
+Telegram `file_id` in `photo_file_id` (free hosting, and it doubles as the
+Mini App thumbnail), and pass the image to Gemini's vision model asking for the
+same structured JSON the caption parser returns — same schema, same output
+shape, one code path.
+
+Optional later improvement: TikTok's public oEmbed endpoint
+(`https://www.tiktok.com/oembed?url=`) is a single unauthenticated GET that
+often returns caption text for photo posts. Nice-to-have, not load-bearing.
+
+**Cache all parsed results.** Parse each link once at intake and store the
+result. Never re-analyze on a planning run — that's the difference between
+staying inside the Gemini free tier and exhausting it.
+
 **Priority scoring happens in code, not in the prompt.** Compute an urgency
 tier before calling the LLM:
 - ends within 7 days → `urgent`
