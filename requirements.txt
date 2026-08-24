@@ -4,6 +4,6 @@ uvicorn[standard]
 yt-dlp
 requests
 apscheduler
-google-generativeai
+google-genai
 anthropic
 python-dotenv

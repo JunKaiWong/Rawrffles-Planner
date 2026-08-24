@@ -15,6 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 POLLING = "polling"
 WEBHOOK = "webhook"
 
+# Confirmed against models.list() and a real generateContent call, not assumed.
+# gemini-2.5-flash now 404s for newly issued keys, and gemini-3.7-flash exists
+# but returns 503 under load often enough to be a poor default; this one has
+# answered every call. Override with GEMINI_MODEL to move up.
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -29,7 +35,7 @@ class Settings:
     webhook_secret: str | None = None
     db_path: Path = PROJECT_ROOT / "planner.db"
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = DEFAULT_GEMINI_MODEL
 
 
 def _require(name: str, env_file: str) -> str:
@@ -96,5 +102,5 @@ def load_settings(env_file: str | None = None) -> Settings:
         # Absent key is not fatal: link capture still works, captions simply go
         # unparsed until one is configured.
         gemini_api_key=(os.getenv("GEMINI_API_KEY") or "").strip() or None,
-        gemini_model=(os.getenv("GEMINI_MODEL") or "gemini-3.6-flash").strip(),
+        gemini_model=(os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip(),
     )

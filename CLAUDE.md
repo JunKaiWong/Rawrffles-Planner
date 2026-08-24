@@ -65,10 +65,20 @@ Development uses a virtualenv at `venv/` (gitignored).
   public-URL metadata fetch for Instagram (captions/hashtags only, single-URL
   requests, no bulk crawling).
 - **Scheduled jobs**: `apscheduler` (weekly plan, daily reminders)
-- **AI planning calls**: `google-generativeai` against the Gemini free tier
-  (primary), with the Anthropic API as an alternate if trial credits are
-  available. Keep the LLM call behind a single `plan_date()` function so the
-  provider can be swapped without touching the rest of the code.
+- **AI planning calls**: `google-genai` against the Gemini free tier (primary).
+  Note: the older `google-generativeai` package is end-of-life (Nov 2025) — do
+  not use it. Anthropic API is an alternate if trial credits are available.
+  Keep the LLM call behind a single `plan_date()` function so the provider can
+  be swapped without touching the rest of the code.
+  **Free tier is ~5 requests/minute** — pace backfills, retry on rate limit, and
+  never split work across two calls that could be done in one.
+  **Confirm model strings against the API, never from memory.** Model names go
+  stale fast: `gemini-2.5-flash` now returns 404 for newly issued keys. Check
+  with `client.models.list()` *and* a real `generate_content` call — being
+  listed does not mean it is callable. Current default is `gemini-3.6-flash`
+  (set via `GEMINI_MODEL`); `gemini-3.7-flash` exists and works but returns 503
+  under load often enough to be a poor default. Retry 429 *and* 503; a 404 is
+  permanent and must not be retried.
 - **Local events**: Ticketmaster Discovery API and/or Eventbrite API free tiers.
 - **Database**: built-in `sqlite3` (two users, low volume). Swap to Postgres
   only if the hosting provider makes that easier.
@@ -151,7 +161,8 @@ plan should say so rather than inventing one.
 - `links(id, url, platform, caption, tags, added_by, added_at, done boolean
   default false, done_at, done_by, rating integer, note text, photo_file_id text,
   event_start date, event_end date, is_evergreen boolean default true,
-  location text, lat real, lng real)`
+  location text, lat real, lng real,
+  category text, subcategory text, tags text)`
 
 ### Time-sensitivity
 
@@ -180,6 +191,31 @@ shape, one code path.
 Optional later improvement: TikTok's public oEmbed endpoint
 (`https://www.tiktok.com/oembed?url=`) is a single unauthenticated GET that
 often returns caption text for photo posts. Nice-to-have, not load-bearing.
+
+**Categorisation happens in the same Gemini call as caption parsing** — same
+quota, no second pass. The primary goal of this app is a tidy, filterable store
+of saved posts, so this field set matters more than the planner.
+
+Use fixed categories plus free tags. Free-form category naming fragments fast
+("Japanese" / "japanese food" / "Jap cuisine" become separate filter values), so
+the model picks from a closed list:
+
+- `category` — exactly one of: `food` | `activity` | `place` | `other`
+- `subcategory` — exactly one, from a fixed list per category:
+  - food: japanese, korean, chinese, local/hawker, western, thai, indian,
+    cafe/dessert, other
+  - activity: sports, hiking/nature, event/festival, arts/museum, workshop,
+    nightlife, other
+  - place: bar, staycation, shopping, scenic/view, other
+- `tags` — free-form, 0–5, for detail that doesn't deserve a category
+  ("halal", "rooftop", "cheap eats", "queue long")
+
+The fixed pair drives filter UI; tags add richness. **Instruct the model to
+return `other` rather than guess** when the caption is ambiguous — a confidently
+wrong category silently hides links from filtered views.
+
+This also simplifies planning later: "one food + one activity nearby" becomes a
+database query rather than something the LLM must infer.
 
 **Cache all parsed results.** Parse each link once at intake and store the
 result. Never re-analyze on a planning run — that's the difference between
@@ -216,6 +252,10 @@ image in the group chat, which the bot links to the most recently completed entr
 
 ## Conventions
 
+- **This file can be wrong.** If a dependency, model name, or API named here is
+  deprecated or no longer available, say so and ask before implementing it —
+  don't follow stale guidance just because it's written down. Verify model
+  strings and package versions against the live API rather than assuming.
 - Keep the AI provider call isolated in one function (`plan_date()`); don't
   scatter provider-specific code across handlers.
 - Every external API call (yt-dlp, Gemini, Ticketmaster) should fail gracefully

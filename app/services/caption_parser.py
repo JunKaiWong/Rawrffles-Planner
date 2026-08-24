@@ -1,4 +1,4 @@
-"""Caption -> structured JSON, via Gemini.
+"""Caption -> structured JSON, via Gemini (google-genai SDK).
 
 CLAUDE.md calls for parsing the caption into
 {title, location, event_start, event_end, is_evergreen} at intake, explicitly
@@ -32,21 +32,20 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 
-import google.generativeai as genai
-
-try:  # pragma: no cover - import shape varies with the client version
-    from google.api_core.exceptions import ResourceExhausted
-except ImportError:  # pragma: no cover
-    ResourceExhausted = ()
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 logger = logging.getLogger(__name__)
 
 PARSE_TIMEOUT_SECONDS = 90
-# The Gemini free tier allows only a handful of requests per minute, and a
-# burst of pasted links hits that ceiling immediately. One retry recovers the
-# common case without turning a rate limit into a lost parse.
-RATE_LIMIT_RETRIES = 1
-RATE_LIMIT_BACKOFF_SECONDS = 20
+# Two distinct transient failures are worth retrying, and both are common on
+# the free tier:
+#   429 (ClientError) - the per-minute request quota, hit by a burst of links;
+#   503 (ServerError) - the newer flash models shedding load under demand.
+# One retry recovers the usual case without turning either into a lost parse.
+TRANSIENT_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 15
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 PROMPT_TEMPLATE = """\
@@ -173,32 +172,42 @@ def parse_caption(
     )
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0,
-            },
+        client = genai.Client(api_key=api_key)
+        config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0,
+            # No tools are supplied, so automatic function calling would only
+            # add a warning on every call.
+            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                disable=True
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - intake must survive any failure
-        logger.exception("could not configure Gemini")
+        logger.exception("could not create Gemini client")
         return ParsedCaption(ok=False, error=f"{type(exc).__name__}: {exc}")
 
     raw = None
-    for attempt in range(RATE_LIMIT_RETRIES + 1):
+    for attempt in range(TRANSIENT_RETRIES + 1):
         try:
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name, contents=prompt, config=config
+            )
             raw = (response.text or "").strip()
             break
-        except ResourceExhausted as exc:
-            if attempt >= RATE_LIMIT_RETRIES:
-                logger.warning("Gemini rate limit hit, giving up: %s", exc)
-                return ParsedCaption(ok=False, error=f"rate limited: {exc}")
+        except (genai_errors.ClientError, genai_errors.ServerError) as exc:
+            # ClientError covers 4xx; only 429 is worth retrying, since a 404
+            # for a retired model will never succeed.
+            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            retryable = isinstance(exc, genai_errors.ServerError) or status == 429
+            if not retryable or attempt >= TRANSIENT_RETRIES:
+                logger.warning("Gemini call failed (status=%s): %s", status, exc)
+                return ParsedCaption(ok=False, error=f"{type(exc).__name__}: {exc}")
             logger.warning(
-                "Gemini rate limit hit, retrying in %ss", RATE_LIMIT_BACKOFF_SECONDS
+                "Gemini transient failure (status=%s), retrying in %ss",
+                status,
+                RETRY_BACKOFF_SECONDS,
             )
-            time.sleep(RATE_LIMIT_BACKOFF_SECONDS)
+            time.sleep(RETRY_BACKOFF_SECONDS)
         except Exception as exc:  # noqa: BLE001 - intake must survive any failure
             logger.exception("Gemini caption parse failed")
             return ParsedCaption(ok=False, error=f"{type(exc).__name__}: {exc}")
