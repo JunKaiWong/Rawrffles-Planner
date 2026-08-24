@@ -27,6 +27,8 @@ _EXPECTED_LINK_COLUMNS = {
     "title": "TEXT",
     "location": "TEXT",
     "region": "TEXT",
+    "category": "TEXT",
+    "subcategory": "TEXT",
     # Reserved for the geocoding step, which is not built yet; they stay NULL
     # until then but are part of the documented schema.
     "lat": "REAL",
@@ -213,6 +215,9 @@ def save_caption_parse(
     event_start: str | None = None,
     event_end: str | None = None,
     is_evergreen: bool = True,
+    category: str | None = None,
+    subcategory: str | None = None,
+    tags: tuple[str, ...] | list[str] | None = None,
     parsed_at: str | None = None,
 ) -> None:
     """Store a caption parse and stamp parsed_at so it never runs again.
@@ -228,6 +233,9 @@ def save_caption_parse(
     original text stays in `caption`.
     """
     parsed_at = parsed_at or utc_now_iso()
+    # Tags are stored comma-separated; the parser strips commas from individual
+    # tags so this split is unambiguous on read.
+    tags_value = ",".join(tags) if tags else None
     with connect(db_path) as conn:
         conn.execute(
             "UPDATE links SET "
@@ -237,6 +245,9 @@ def save_caption_parse(
             "  event_start = COALESCE(?, event_start), "
             "  event_end = COALESCE(?, event_end), "
             "  is_evergreen = ?, "
+            "  category = COALESCE(?, category), "
+            "  subcategory = COALESCE(?, subcategory), "
+            "  tags = COALESCE(?, tags), "
             "  parsed_at = ? "
             "WHERE id = ?",
             (
@@ -246,18 +257,25 @@ def save_caption_parse(
                 event_start,
                 event_end,
                 1 if is_evergreen else 0,
+                category,
+                subcategory,
+                tags_value,
                 parsed_at,
                 link_id,
             ),
         )
     logger.info(
-        "cached caption parse for id=%s: location=%r region=%r start=%s end=%s evergreen=%s",
+        "cached caption parse for id=%s: location=%r region=%r start=%s end=%s "
+        "evergreen=%s category=%s/%s tags=%s",
         link_id,
         (location or "")[:60],
         region,
         event_start,
         event_end,
         is_evergreen,
+        category,
+        subcategory,
+        tags_value,
     )
 
 
@@ -307,7 +325,8 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "region, lat, lng, tags, added_by, added_at, done, done_at, done_by, "
+            "region, category, subcategory, lat, lng, tags, added_by, added_at, "
+            "done, done_at, done_by, "
             "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
             "parsed_at "
             "FROM links ORDER BY added_at DESC, id DESC"
@@ -320,7 +339,8 @@ def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "region, lat, lng, tags, added_by, added_at, done, done_at, done_by, "
+            "region, category, subcategory, lat, lng, tags, added_by, added_at, "
+            "done, done_at, done_by, "
             "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
             "parsed_at "
             "FROM links WHERE id = ?",

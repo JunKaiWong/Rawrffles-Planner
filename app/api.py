@@ -72,13 +72,17 @@ class LinkOut(BaseModel):
     caption: str | None = None
     location: str | None = None
     region: str | None = None
+    category: str | None = None
+    subcategory: str | None = None
     lat: float | None = None
     lng: float | None = None
     # True when the link is outside the home region: kept and browsable, but
     # excluded from MRT-based Saturday clustering.
     is_day_trip: bool = False
     parsed_at: str | None = None
-    tags: str | None = None
+    # Stored comma-separated in SQLite; exposed as a list so clients never
+    # re-implement the split.
+    tags: list[str] = []
     added_by: int
     added_at: str
     done: bool
@@ -121,6 +125,8 @@ def _row_to_link(row) -> LinkOut:
     # Derived server-side so the rule lives in one place rather than being
     # re-implemented by every client.
     data["is_day_trip"] = is_day_trip(data.get("region"))
+    raw_tags = data.get("tags") or ""
+    data["tags"] = [tag for tag in (t.strip() for t in raw_tags.split(",")) if tag]
     return LinkOut(**data)
 
 

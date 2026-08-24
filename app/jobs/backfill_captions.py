@@ -75,7 +75,7 @@ async def backfill(
         if dry_run:
             logger.info(
                 "[dry-run] id=%s would set title=%r location=%r region=%r "
-                "start=%s end=%s evergreen=%s day_trip=%s",
+                "start=%s end=%s evergreen=%s category=%s/%s tags=%s day_trip=%s",
                 link_id,
                 (result.title or "")[:50],
                 (result.location or "")[:50],
@@ -83,6 +83,9 @@ async def backfill(
                 result.event_start,
                 result.event_end,
                 result.is_evergreen,
+                result.category,
+                result.subcategory,
+                list(result.tags),
                 is_day_trip(result.region),
             )
         else:
@@ -95,6 +98,9 @@ async def backfill(
                 event_start=result.event_start,
                 event_end=result.event_end,
                 is_evergreen=result.is_evergreen,
+                category=result.category,
+                subcategory=result.subcategory,
+                tags=result.tags,
             )
         parsed_count += 1
 

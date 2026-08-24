@@ -124,9 +124,21 @@ const isDev = !hasRealInitData;
 
 // --- State ----------------------------------------------------------------
 
+// Mirrors the closed taxonomy in CLAUDE.md. Kept here only for chip ordering
+// and labels; the API is the source of truth for a link's actual values.
+const CATEGORY_LABELS = {
+  food: "Food",
+  activity: "Activity",
+  place: "Place",
+  other: "Other",
+};
+
 const state = {
   links: [],
   tab: "todo",
+  category: "all",
+  subcategory: "all",
+  tag: null,
   pending: null, // link awaiting the done sheet
   saving: false,
 };
@@ -135,6 +147,9 @@ const els = {
   list: document.getElementById("list"),
   status: document.getElementById("status"),
   subtitle: document.getElementById("subtitle"),
+  categoryFilters: document.getElementById("category-filters"),
+  subcategoryFilters: document.getElementById("subcategory-filters"),
+  activeFilters: document.getElementById("active-filters"),
   countTodo: document.getElementById("count-todo"),
   countDayTrip: document.getElementById("count-daytrip"),
   countDone: document.getElementById("count-done"),
@@ -243,6 +258,20 @@ function cardHtml(link) {
   if (link.added_at) meta.push(`<span class="meta__item">${escapeHtml(formatDate(link.added_at))}</span>`);
   if (expired) meta.push(`<span class="meta__item meta__item--warn">expired</span>`);
 
+  if (link.category && link.category !== "other") {
+    const sub = link.subcategory && link.subcategory !== "other" ? ` · ${link.subcategory}` : "";
+    meta.push(
+      `<span class="badge badge--category">${escapeHtml(CATEGORY_LABELS[link.category] || link.category)}${escapeHtml(sub)}</span>`
+    );
+  }
+
+  const tagChips = (link.tags || [])
+    .map(
+      (tag) =>
+        `<button type="button" class="tag${state.tag === tag ? " is-active" : ""}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`
+    )
+    .join("");
+
   const doneDetails = [];
   if (link.rating) doneDetails.push(`<span class="chip chip--rating">${link.rating}/10</span>`);
   if (link.note) doneDetails.push(`<span class="chip">${escapeHtml(link.note)}</span>`);
@@ -253,6 +282,7 @@ function cardHtml(link) {
         <h2 class="card__title">${title}</h2>
         ${caption ? `<p class="card__caption">${caption}</p>` : ""}
         <div class="card__meta">${meta.join("")}</div>
+        ${tagChips ? `<div class="card__tags">${tagChips}</div>` : ""}
         ${doneDetails.length ? `<div class="card__done-details">${doneDetails.join("")}</div>` : ""}
       </div>
       <div class="card__actions">
@@ -276,6 +306,72 @@ function setStatus(message, kind = "info") {
   els.status.textContent = message;
 }
 
+function matchesFilters(link) {
+  if (state.category !== "all" && (link.category || "other") !== state.category) return false;
+  if (state.subcategory !== "all" && (link.subcategory || "other") !== state.subcategory) return false;
+  if (state.tag && !(link.tags || []).includes(state.tag)) return false;
+  return true;
+}
+
+function chipHtml(label, count, active, dataset) {
+  const attrs = Object.entries(dataset)
+    .map(([key, value]) => `data-${key}="${escapeHtml(value)}"`)
+    .join(" ");
+  return `<button type="button" class="chip-btn${active ? " is-active" : ""}" ${attrs}>
+    ${escapeHtml(label)}<span class="chip-btn__count">${count}</span>
+  </button>`;
+}
+
+function renderFilters(tabLinks) {
+  // Counts come from the current tab's links, before category/tag filtering,
+  // so switching chips never shows a count that cannot be reached.
+  const counts = {};
+  tabLinks.forEach((link) => {
+    const category = link.category || "other";
+    counts[category] = (counts[category] || 0) + 1;
+  });
+
+  const categories = Object.keys(CATEGORY_LABELS).filter((c) => counts[c]);
+  els.categoryFilters.innerHTML =
+    chipHtml("All", tabLinks.length, state.category === "all", { filter: "category", value: "all" }) +
+    categories
+      .map((c) => chipHtml(CATEGORY_LABELS[c], counts[c], state.category === c, { filter: "category", value: c }))
+      .join("");
+
+  // Subcategories only make sense once a category is chosen.
+  if (state.category === "all") {
+    els.subcategoryFilters.hidden = true;
+    els.subcategoryFilters.innerHTML = "";
+  } else {
+    const subCounts = {};
+    tabLinks
+      .filter((link) => (link.category || "other") === state.category)
+      .forEach((link) => {
+        const sub = link.subcategory || "other";
+        subCounts[sub] = (subCounts[sub] || 0) + 1;
+      });
+    const subs = Object.keys(subCounts).sort();
+    els.subcategoryFilters.hidden = subs.length <= 1;
+    els.subcategoryFilters.innerHTML =
+      chipHtml("All", tabLinks.filter((l) => (l.category || "other") === state.category).length,
+        state.subcategory === "all", { filter: "subcategory", value: "all" }) +
+      subs
+        .map((s) => chipHtml(s, subCounts[s], state.subcategory === s, { filter: "subcategory", value: s }))
+        .join("");
+  }
+
+  if (state.tag) {
+    els.activeFilters.hidden = false;
+    els.activeFilters.innerHTML =
+      `<button type="button" class="chip-btn chip-btn--clear" data-filter="tag" data-value="">
+        tag: ${escapeHtml(state.tag)} ✕
+      </button>`;
+  } else {
+    els.activeFilters.hidden = true;
+    els.activeFilters.innerHTML = "";
+  }
+}
+
 function render() {
   const done = state.links.filter((link) => link.done);
   const outstanding = state.links.filter((link) => !link.done);
@@ -291,14 +387,20 @@ function render() {
   els.subtitle.textContent = `${state.links.length} saved · ${done.length} visited`;
 
   const byTab = { todo, daytrip: dayTrips, done };
-  const visible = byTab[state.tab] || todo;
+  const tabLinks = byTab[state.tab] || todo;
+  renderFilters(tabLinks);
+
+  const visible = tabLinks.filter(matchesFilters);
   els.list.innerHTML = visible.map(cardHtml).join("");
 
-  const emptyMessage = {
-    todo: "Nothing to visit yet. Paste a TikTok or Instagram link in the group.",
-    daytrip: "No day trips saved. Links outside Singapore show up here.",
-    done: "Nothing marked done yet.",
-  }[state.tab];
+  const filtered = visible.length !== tabLinks.length || state.category !== "all" || state.tag;
+  const emptyMessage = filtered
+    ? "Nothing matches these filters."
+    : {
+        todo: "Nothing to visit yet. Paste a TikTok or Instagram link in the group.",
+        daytrip: "No day trips saved. Links outside Singapore show up here.",
+        done: "Nothing marked done yet.",
+      }[state.tab];
 
   setStatus(visible.length === 0 ? emptyMessage : "", "empty");
 }
@@ -334,9 +436,34 @@ function closeSheet() {
 
 // --- Events ---------------------------------------------------------------
 
+function onFilterClick(event) {
+  const button = event.target.closest(".chip-btn");
+  if (!button) return;
+  const { filter, value } = button.dataset;
+  if (filter === "category") {
+    state.category = value;
+    // A subcategory from the previous category would match nothing.
+    state.subcategory = "all";
+  } else if (filter === "subcategory") {
+    state.subcategory = value;
+  } else if (filter === "tag") {
+    state.tag = value || null;
+  }
+  render();
+}
+
+els.categoryFilters.addEventListener("click", onFilterClick);
+els.subcategoryFilters.addEventListener("click", onFilterClick);
+els.activeFilters.addEventListener("click", onFilterClick);
+
 els.tabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     state.tab = tab.dataset.tab;
+    // Filters are per-view: carrying them across tabs strands the user on an
+    // empty list with no obvious cause.
+    state.category = "all";
+    state.subcategory = "all";
+    state.tag = null;
     els.tabs.forEach((other) => {
       const active = other === tab;
       other.classList.toggle("is-active", active);
@@ -347,6 +474,14 @@ els.tabs.forEach((tab) => {
 });
 
 els.list.addEventListener("click", async (event) => {
+  // Tapping a tag on a card filters by it.
+  const tagButton = event.target.closest("button[data-tag]");
+  if (tagButton) {
+    state.tag = state.tag === tagButton.dataset.tag ? null : tagButton.dataset.tag;
+    render();
+    return;
+  }
+
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   const card = button.closest(".card");

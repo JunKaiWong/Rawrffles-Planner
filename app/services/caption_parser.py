@@ -48,6 +48,32 @@ TRANSIENT_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 15
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# The closed taxonomy from CLAUDE.md. Free-form category naming fragments fast
+# ("Japanese" / "japanese food" / "Jap cuisine" become three filter values), so
+# the model picks from these lists and anything outside them is coerced to
+# "other" here rather than being allowed into the database.
+CATEGORIES = ("food", "activity", "place", "other")
+
+SUBCATEGORIES = {
+    "food": (
+        "japanese", "korean", "chinese", "local/hawker", "western",
+        "thai", "indian", "cafe/dessert", "other",
+    ),
+    "activity": (
+        "sports", "hiking/nature", "event/festival", "arts/museum",
+        "workshop", "nightlife", "other",
+    ),
+    "place": ("bar", "staycation", "shopping", "scenic/view", "other"),
+    # CLAUDE.md defines no subcategory list for the catch-all category.
+    "other": ("other",),
+}
+
+MAX_TAGS = 5
+
+_TAXONOMY_BLOCK = "\n".join(
+    f"  - {category}: {', '.join(subs)}" for category, subs in SUBCATEGORIES.items()
+)
+
 PROMPT_TEMPLATE = """\
 You extract structured facts about a place or event from a social media caption.
 
@@ -62,8 +88,14 @@ Return ONLY a JSON object with exactly these keys:
   "region":       the country it is in (e.g. "Singapore", "Malaysia"), or null,
   "event_start":  "YYYY-MM-DD" or null,
   "event_end":    "YYYY-MM-DD" or null,
-  "is_evergreen": true or false
+  "is_evergreen": true or false,
+  "category":     exactly one of: {categories},
+  "subcategory":  exactly one, from the list for the chosen category,
+  "tags":         array of 0 to {max_tags} short lowercase free-form tags
 }}
+
+Allowed subcategories per category:
+{taxonomy}
 
 Rules:
 - is_evergreen is true for permanent things (a restaurant, a park, a shop) and
@@ -72,6 +104,13 @@ Rules:
   a date that is not supported by the caption.
 - Do not infer a country from your own knowledge of a venue name; only use what
   the caption states or clearly implies (e.g. an explicit city or country).
+- category and subcategory MUST come from the lists above, spelled exactly.
+  When the caption is ambiguous, return "other" rather than guessing: a
+  confidently wrong category silently hides the link from filtered views,
+  which is worse than an honest "other".
+- tags carry detail that does not deserve a category ("halal", "rooftop",
+  "cheap eats", "queue long"). Use an empty array if nothing is worth tagging;
+  do not restate the category or the venue name as a tag.
 
 Platform: {platform}
 Post title: {title}
@@ -93,6 +132,9 @@ class ParsedCaption:
     event_start: str | None = None
     event_end: str | None = None
     is_evergreen: bool = True
+    category: str = "other"
+    subcategory: str = "other"
+    tags: tuple[str, ...] = ()
     error: str | None = None
 
 
@@ -123,6 +165,59 @@ def _clean_date(value: object, field: str) -> str | None:
         logger.warning("discarding impossible %s from model: %r", field, text)
         return None
     return text
+
+
+def _clean_taxonomy(payload: dict) -> tuple[str, str]:
+    """Force category/subcategory into the closed taxonomy.
+
+    Coercion is logged rather than silent: an unexpected value means the prompt
+    and the taxonomy have drifted apart, and the symptom otherwise is links
+    quietly missing from a filtered view.
+    """
+    category = (_clean(payload.get("category")) or "other").lower()
+    if category not in CATEGORIES:
+        logger.warning("model returned unknown category %r, using 'other'", category)
+        category = "other"
+
+    subcategory = (_clean(payload.get("subcategory")) or "other").lower()
+    allowed = SUBCATEGORIES[category]
+    if subcategory not in allowed:
+        logger.warning(
+            "model returned subcategory %r not valid for category %r, using 'other'",
+            subcategory,
+            category,
+        )
+        subcategory = "other"
+    return category, subcategory
+
+
+def _clean_tags(value: object) -> tuple[str, ...]:
+    """Normalise tags to a short, de-duplicated, lowercase tuple.
+
+    Commas are stripped from individual tags because the column stores them
+    comma-separated; a tag containing one would corrupt the split on read.
+    """
+    if isinstance(value, str):
+        # Tolerate a comma-separated string where an array was asked for.
+        items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        if value is not None:
+            logger.warning("model returned tags of unexpected type %s", type(value))
+        return ()
+
+    seen: list[str] = []
+    for item in items:
+        tag = _clean(item)
+        if tag is None:
+            continue
+        tag = tag.lower().replace(",", " ").strip()
+        if tag and tag not in seen:
+            seen.append(tag)
+    if len(seen) > MAX_TAGS:
+        logger.info("trimming %d tags to %d", len(seen), MAX_TAGS)
+    return tuple(seen[:MAX_TAGS])
 
 
 def _extract_json(raw: str) -> dict | None:
@@ -169,6 +264,9 @@ def parse_caption(
         platform=platform or "unknown",
         title=title or "(none)",
         caption=source[:4000],
+        categories=" | ".join(CATEGORIES),
+        taxonomy=_TAXONOMY_BLOCK,
+        max_tags=MAX_TAGS,
     )
 
     try:
@@ -231,6 +329,8 @@ def parse_caption(
     if event_end:
         is_evergreen = False
 
+    category, subcategory = _clean_taxonomy(payload)
+
     parsed = ParsedCaption(
         ok=True,
         title=_clean(payload.get("title")),
@@ -239,15 +339,22 @@ def parse_caption(
         event_start=event_start,
         event_end=event_end,
         is_evergreen=is_evergreen,
+        category=category,
+        subcategory=subcategory,
+        tags=_clean_tags(payload.get("tags")),
     )
     logger.info(
-        "parsed caption -> title=%r location=%r region=%r start=%s end=%s evergreen=%s",
+        "parsed caption -> title=%r location=%r region=%r start=%s end=%s "
+        "evergreen=%s category=%s/%s tags=%s",
         (parsed.title or "")[:60],
         (parsed.location or "")[:60],
         parsed.region,
         parsed.event_start,
         parsed.event_end,
         parsed.is_evergreen,
+        parsed.category,
+        parsed.subcategory,
+        list(parsed.tags),
     )
     return parsed
 

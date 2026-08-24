@@ -56,6 +56,16 @@
     </button>
   </nav>
 
+  <!--
+    Filters operate within the selected tab. Counts are computed from that
+    tab's links so a chip never promises results the list cannot show.
+  -->
+  <div class="filters">
+    <div class="filters__row" id="category-filters"></div>
+    <div class="filters__row filters__row--sub" id="subcategory-filters" hidden></div>
+    <div class="filters__row" id="active-filters" hidden></div>
+  </div>
+
   <main id="list" class="list" aria-live="polite"></main>
 
   <!-- Empty / error / loading states share one region. -->

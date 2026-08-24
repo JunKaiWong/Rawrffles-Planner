@@ -127,6 +127,9 @@ async def _parse_and_store(context, db_path, link_id: int, platform: str, metada
         event_start=parsed.event_start,
         event_end=parsed.event_end,
         is_evergreen=parsed.is_evergreen,
+        category=parsed.category,
+        subcategory=parsed.subcategory,
+        tags=parsed.tags,
     )
     return parsed
 
@@ -142,6 +145,11 @@ def _summarise_saved(link_id: int, platform: str, url: str, metadata, parsed=Non
         suffix = f" ({region})" if region and is_day_trip(region) else ""
         lines.append(f"     location: {location}{suffix}")
 
+    if parsed and parsed.category:
+        label = f"{parsed.category}/{parsed.subcategory}"
+        if parsed.tags:
+            label += f" · {', '.join(parsed.tags)}"
+        lines.append(f"     {label}")
     if parsed and parsed.event_end:
         window = parsed.event_start or "?"
         lines.append(f"     runs: {window} to {parsed.event_end}")

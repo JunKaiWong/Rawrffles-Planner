@@ -181,6 +181,90 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* --- Filters --- */
+
+.filters {
+  padding: 0 16px;
+}
+
+.filters__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.filters__row[hidden] {
+  display: none;
+}
+
+.filters__row--sub {
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
+.chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tg-hint);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chip-btn.is-active {
+  background: var(--tg-secondary-bg);
+  border-color: var(--tg-button);
+  color: var(--tg-text);
+  font-weight: 600;
+}
+
+.chip-btn__count {
+  font-size: 11px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.chip-btn--clear {
+  border-color: var(--tg-button);
+  color: var(--tg-text);
+}
+
+/* --- Tags on cards --- */
+
+.card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--tg-hint);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tag.is-active {
+  background: var(--tg-button);
+  border-color: var(--tg-button);
+  color: var(--tg-button-text);
+}
+
+.badge--category {
+  background: rgba(90, 163, 240, 0.18);
+  color: #3d84cc;
+}
+
 /* --- Cards --- */
 
 .list {

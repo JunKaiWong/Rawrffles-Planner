@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS links (
     event_end      TEXT,
     is_evergreen   INTEGER NOT NULL DEFAULT 1,
     region         TEXT,                      -- country, e.g. 'Singapore'
+    category       TEXT,                      -- closed set: food|activity|place|other
+    subcategory    TEXT,                      -- closed set, per category
     lat            REAL,                      -- set by geocoding, not yet built
     lng            REAL,
     parsed_at      TEXT                       -- caption parse cache marker

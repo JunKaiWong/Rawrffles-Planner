@@ -70,8 +70,12 @@ Development uses a virtualenv at `venv/` (gitignored).
   not use it. Anthropic API is an alternate if trial credits are available.
   Keep the LLM call behind a single `plan_date()` function so the provider can
   be swapped without touching the rest of the code.
-  **Free tier is ~5 requests/minute** — pace backfills, retry on rate limit, and
-  never split work across two calls that could be done in one.
+  **Free tier is ~5 requests/minute AND ~20 requests/day, per model.** The
+  daily cap is the binding constraint and is easy to exhaust while testing;
+  the quota is scoped per model, so switching `GEMINI_MODEL` yields a fresh
+  daily allowance. Pace backfills, retry on rate limit, and never split work
+  across two calls that could be done in one — this is why categorisation
+  shares the caption-parsing call rather than adding a second pass.
   **Confirm model strings against the API, never from memory.** Model names go
   stale fast: `gemini-2.5-flash` now returns 404 for newly issued keys. Check
   with `client.models.list()` *and* a real `generate_content` call — being
