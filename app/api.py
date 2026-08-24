@@ -24,10 +24,11 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.auth import InitDataError, TelegramUser, authorise_user
-from app.config import Settings, load_settings
+from app.config import PROJECT_ROOT, Settings, load_settings
 from app.db.database import get_link, init_db, list_links, update_link
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,14 @@ INIT_DATA_HEADER = "X-Telegram-Init-Data"
 # load before the user can authorise, and the health check must work for the
 # host's uptime probe. Neither exposes any data.
 PUBLIC_PATHS = frozenset({"/docs", "/redoc", "/openapi.json", "/health", "/docs/oauth2-redirect"})
+
+# Prefixes that skip authentication. The Mini App's own HTML/CSS/JS must load
+# before Telegram can hand it initData, so the static bundle is public - it
+# contains no secrets and no data, only the code that then authenticates. Every
+# /api/* route stays behind the gate.
+PUBLIC_PREFIXES = ("/miniapp",)
+
+MINIAPP_DIR = PROJECT_ROOT / "miniapp"
 
 # Declared so Swagger UI shows an Authorize button and sends the header. This
 # is documentation of the real check, not the check itself - the middleware
@@ -150,7 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def authenticate(request: Request, call_next):
         """The single gate every request passes through."""
         path = request.url.path
-        if path in PUBLIC_PATHS:
+        if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
             return await call_next(request)
 
         init_data = request.headers.get(INIT_DATA_HEADER, "")
@@ -176,6 +185,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["meta"], summary="Liveness probe (unauthenticated)")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    # Serve the Mini App from the same origin as the API so browser requests
+    # need no CORS handling and Telegram loads one host.
+    if MINIAPP_DIR.is_dir():
+        app.mount(
+            "/miniapp",
+            StaticFiles(directory=MINIAPP_DIR, html=True),
+            name="miniapp",
+        )
+        logger.info("serving Mini App from %s at /miniapp", MINIAPP_DIR)
+    else:  # pragma: no cover - only if the directory is missing
+        logger.warning("Mini App directory not found at %s", MINIAPP_DIR)
 
     @app.get(
         "/api/links",

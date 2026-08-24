@@ -1,14 +1,86 @@
-<!-- Link list UI: To visit / Done. TODO: implement (First session goal #4). -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Rawrffles Planner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Planner</title>
+  <!--
+    Telegram's SDK. Inside Telegram this populates window.Telegram.WebApp with
+    real initData. In a plain browser it either fails to load or yields an empty
+    initData, and app.js falls back to the development stub.
+  -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- Shown only in browser/dev mode, when no real Telegram initData exists. -->
+  <div id="dev-banner" class="dev-banner" hidden>
+    <div class="dev-banner__row">
+      <span class="dev-banner__label">DEV</span>
+      <span id="dev-banner__text" class="dev-banner__text">Running outside Telegram.</span>
+      <button id="dev-token-btn" class="dev-banner__btn" type="button">Set token</button>
+    </div>
+    <!--
+      An inline field rather than window.prompt: prompt() blocks the page, and
+      firing it automatically on load is jarring. This also keeps the token
+      visible so a truncated or stale paste is obvious.
+    -->
+    <form id="dev-token-form" class="dev-banner__form" hidden>
+      <input id="dev-token-input" class="dev-banner__input" type="text"
+             autocomplete="off" spellcheck="false"
+             placeholder="paste output of: python -m scripts.make_init_data" />
+      <button class="dev-banner__btn" type="submit">Save</button>
+      <button class="dev-banner__btn" type="button" id="dev-token-clear">Clear</button>
+    </form>
+  </div>
+
+  <header class="header">
+    <h1 class="header__title">Places to go</h1>
+    <p id="subtitle" class="header__subtitle">Loading…</p>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" role="tab" data-tab="todo" aria-selected="true">
+      To visit <span class="tab__count" id="count-todo">0</span>
+    </button>
+    <button class="tab" role="tab" data-tab="done" aria-selected="false">
+      Done <span class="tab__count" id="count-done">0</span>
+    </button>
+  </nav>
+
+  <main id="list" class="list" aria-live="polite"></main>
+
+  <!-- Empty / error / loading states share one region. -->
+  <div id="status" class="status" hidden></div>
+
+  <!--
+    Done sheet: marking something done captures a rating and a note, since the
+    rating is what feeds back into the AI planner.
+  -->
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet__backdrop" data-close="1"></div>
+    <form class="sheet__panel" id="done-form">
+      <h2 class="sheet__title">Mark as done</h2>
+      <p class="sheet__subtitle" id="sheet-place"></p>
+
+      <label class="field">
+        <span class="field__label">Rating <span class="field__hint">optional, 1–10</span></span>
+        <div class="rating" id="rating"></div>
+      </label>
+
+      <label class="field">
+        <span class="field__label">Note <span class="field__hint">optional</span></span>
+        <textarea id="note" class="field__input" rows="3"
+                  placeholder="e.g. go before 7pm or you queue"></textarea>
+      </label>
+
+      <div class="sheet__actions">
+        <button type="button" class="btn btn--ghost" data-close="1">Cancel</button>
+        <button type="submit" class="btn btn--primary" id="save-btn">Save</button>
+      </div>
+    </form>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>
