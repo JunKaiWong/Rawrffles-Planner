@@ -136,6 +136,7 @@ const els = {
   status: document.getElementById("status"),
   subtitle: document.getElementById("subtitle"),
   countTodo: document.getElementById("count-todo"),
+  countDayTrip: document.getElementById("count-daytrip"),
   countDone: document.getElementById("count-done"),
   tabs: document.querySelectorAll(".tab"),
   sheet: document.getElementById("sheet"),
@@ -231,7 +232,14 @@ function cardHtml(link) {
   const expired = isExpired(link);
 
   const meta = [`<span class="badge badge--${escapeHtml(link.platform)}">${platform}</span>`];
+  if (link.is_day_trip && link.region) {
+    meta.push(`<span class="badge badge--daytrip">${escapeHtml(link.region)}</span>`);
+  }
   if (link.location) meta.push(`<span class="meta__item">📍 ${escapeHtml(link.location)}</span>`);
+  if (link.event_end) {
+    const window_ = link.event_start ? `${link.event_start} → ${link.event_end}` : `until ${link.event_end}`;
+    meta.push(`<span class="meta__item meta__item--dates">🗓 ${escapeHtml(window_)}</span>`);
+  }
   if (link.added_at) meta.push(`<span class="meta__item">${escapeHtml(formatDate(link.added_at))}</span>`);
   if (expired) meta.push(`<span class="meta__item meta__item--warn">expired</span>`);
 
@@ -269,25 +277,30 @@ function setStatus(message, kind = "info") {
 }
 
 function render() {
-  const todo = state.links.filter((link) => !link.done);
   const done = state.links.filter((link) => link.done);
+  const outstanding = state.links.filter((link) => !link.done);
+  // Day trips are split out of "To visit" so the main list stays the set the
+  // Saturday planner will actually cluster. is_day_trip is computed by the
+  // API, so the rule is not duplicated here.
+  const dayTrips = outstanding.filter((link) => link.is_day_trip);
+  const todo = outstanding.filter((link) => !link.is_day_trip);
+
   els.countTodo.textContent = todo.length;
+  els.countDayTrip.textContent = dayTrips.length;
   els.countDone.textContent = done.length;
   els.subtitle.textContent = `${state.links.length} saved · ${done.length} visited`;
 
-  const visible = state.tab === "todo" ? todo : done;
+  const byTab = { todo, daytrip: dayTrips, done };
+  const visible = byTab[state.tab] || todo;
   els.list.innerHTML = visible.map(cardHtml).join("");
 
-  if (visible.length === 0) {
-    setStatus(
-      state.tab === "todo"
-        ? "Nothing to visit yet. Paste a TikTok or Instagram link in the group."
-        : "Nothing marked done yet.",
-      "empty"
-    );
-  } else {
-    setStatus("");
-  }
+  const emptyMessage = {
+    todo: "Nothing to visit yet. Paste a TikTok or Instagram link in the group.",
+    daytrip: "No day trips saved. Links outside Singapore show up here.",
+    done: "Nothing marked done yet.",
+  }[state.tab];
+
+  setStatus(visible.length === 0 ? emptyMessage : "", "empty");
 }
 
 // --- Done sheet -----------------------------------------------------------

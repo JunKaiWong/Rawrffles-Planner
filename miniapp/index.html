@@ -43,6 +43,14 @@
     <button class="tab is-active" role="tab" data-tab="todo" aria-selected="true">
       To visit <span class="tab__count" id="count-todo">0</span>
     </button>
+    <!--
+      Day trips are links outside the home region. They stay saved and
+      browsable here, but the Saturday planner will not cluster them as if
+      they were an MRT stop away.
+    -->
+    <button class="tab" role="tab" data-tab="daytrip" aria-selected="false">
+      Day trips <span class="tab__count" id="count-daytrip">0</span>
+    </button>
     <button class="tab" role="tab" data-tab="done" aria-selected="false">
       Done <span class="tab__count" id="count-done">0</span>
     </button>

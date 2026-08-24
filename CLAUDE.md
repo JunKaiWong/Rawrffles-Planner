@@ -114,11 +114,44 @@ requirements.txt
 CLAUDE.md
 ```
 
+## Location, clustering, and travel
+
+Plans must be geographically coherent — the couple travels by MRT, so stops
+should be near each other.
+
+**Geocoding**: use OneMap (Singapore Land Authority) — free, locally accurate,
+MRT-aware. Address search needs no authentication; routing requires a free
+registered token. Store `lat` / `lng` on each link once resolved, so geocoding
+happens once per link, never per plan.
+
+Pipeline order (each step blocks the next):
+1. Caption → structured JSON, including a `location` string.
+2. `location` string → lat/lng via OneMap search.
+3. **Cluster candidates in code**, not in the prompt. Compute proximity and
+   hand the LLM a pre-grouped shortlist. Asking the model to "keep things close
+   together" from raw addresses is unreliable; distance is deterministic.
+4. Call OneMap public-transport routing for real MRT journey times between the
+   chosen stops, and pass those into the prompt as facts.
+
+### Grounding rule (important)
+
+**The LLM arranges and explains; it never originates a place name.** Every venue
+in a generated plan must trace back either to a saved link or to a real search
+result. Do not let the model suggest restaurants or activities from its own
+knowledge — it will produce closed venues and plausible-sounding places that
+don't exist, and the failure is discovered in person.
+
+When the saved links don't cover a gap (e.g. no food saved near the anchor
+point), query OneMap's thematic layers for real nearby amenities and pass those
+results into the prompt as the candidate set. If no real candidate exists, the
+plan should say so rather than inventing one.
+
 ## Database (starting schema)
 
 - `links(id, url, platform, caption, tags, added_by, added_at, done boolean
   default false, done_at, done_by, rating integer, note text, photo_file_id text,
-  event_start date, event_end date, is_evergreen boolean default true)`
+  event_start date, event_end date, is_evergreen boolean default true,
+  location text, lat real, lng real)`
 
 ### Time-sensitivity
 

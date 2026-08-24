@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import InitDataError, TelegramUser, authorise_user
 from app.config import PROJECT_ROOT, Settings, load_settings
-from app.db.database import get_link, init_db, list_links, update_link
+from app.db.database import get_link, init_db, is_day_trip, list_links, update_link
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,13 @@ class LinkOut(BaseModel):
     title: str | None = None
     caption: str | None = None
     location: str | None = None
+    region: str | None = None
+    lat: float | None = None
+    lng: float | None = None
+    # True when the link is outside the home region: kept and browsable, but
+    # excluded from MRT-based Saturday clustering.
+    is_day_trip: bool = False
+    parsed_at: str | None = None
     tags: str | None = None
     added_by: int
     added_at: str
@@ -111,6 +118,9 @@ def _row_to_link(row) -> LinkOut:
     # SQLite stores booleans as integers.
     data["done"] = bool(data["done"])
     data["is_evergreen"] = bool(data["is_evergreen"])
+    # Derived server-side so the rule lives in one place rather than being
+    # re-implemented by every client.
+    data["is_day_trip"] = is_day_trip(data.get("region"))
     return LinkOut(**data)
 
 

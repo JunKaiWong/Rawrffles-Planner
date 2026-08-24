@@ -26,7 +26,27 @@ _EXPECTED_LINK_COLUMNS = {
     "canonical_url": "TEXT",
     "title": "TEXT",
     "location": "TEXT",
+    "region": "TEXT",
+    # Reserved for the geocoding step, which is not built yet; they stay NULL
+    # until then but are part of the documented schema.
+    "lat": "REAL",
+    "lng": "REAL",
+    # Set once a caption has been parsed, so it is never parsed twice.
+    "parsed_at": "TEXT",
 }
+
+# Links outside this region are kept and browsable but excluded from MRT-based
+# Saturday clustering - they are day trips, not a stop away.
+HOME_REGION = "singapore"
+
+
+def is_day_trip(region: str | None) -> bool:
+    """True when a link is known to be outside the home region.
+
+    An unknown region is deliberately NOT a day trip: an unparsed link should
+    fall through to the normal planner rather than being quietly set aside.
+    """
+    return bool(region) and region.strip().lower() != HOME_REGION
 
 
 def utc_now_iso() -> str:
@@ -184,6 +204,92 @@ def update_link_metadata(
     logger.info("updated link id=%s fields=%s", link_id, ", ".join(updates))
 
 
+def save_caption_parse(
+    db_path: str | Path,
+    link_id: int,
+    title: str | None = None,
+    location: str | None = None,
+    region: str | None = None,
+    event_start: str | None = None,
+    event_end: str | None = None,
+    is_evergreen: bool = True,
+    parsed_at: str | None = None,
+) -> None:
+    """Store a caption parse and stamp parsed_at so it never runs again.
+
+    parsed_at is always written, including when the parse found nothing: the
+    marker records that the question was asked, which is what keeps the call
+    count at one per link.
+
+    The parsed `title` wins over yt-dlp's when present. yt-dlp returns the
+    post's headline, which for Instagram is the useless "Video by <handle>",
+    whereas the parse returns the name of the actual place - which is what the
+    Mini App lists and what planning reasons about. Nothing is lost: the full
+    original text stays in `caption`.
+    """
+    parsed_at = parsed_at or utc_now_iso()
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE links SET "
+            "  title = COALESCE(?, title), "
+            "  location = COALESCE(?, location), "
+            "  region = COALESCE(?, region), "
+            "  event_start = COALESCE(?, event_start), "
+            "  event_end = COALESCE(?, event_end), "
+            "  is_evergreen = ?, "
+            "  parsed_at = ? "
+            "WHERE id = ?",
+            (
+                title,
+                location,
+                region,
+                event_start,
+                event_end,
+                1 if is_evergreen else 0,
+                parsed_at,
+                link_id,
+            ),
+        )
+    logger.info(
+        "cached caption parse for id=%s: location=%r region=%r start=%s end=%s evergreen=%s",
+        link_id,
+        (location or "")[:60],
+        region,
+        event_start,
+        event_end,
+        is_evergreen,
+    )
+
+
+def links_needing_caption_parse(db_path: str | Path) -> list[sqlite3.Row]:
+    """Rows whose caption has never been parsed.
+
+    parsed_at IS NULL is the whole cache check - a parsed row is never
+    reconsidered, however sparse its result was.
+    """
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, platform, title, caption FROM links "
+            "WHERE parsed_at IS NULL ORDER BY id"
+        ).fetchall()
+    logger.info("%d link(s) awaiting caption parse", len(rows))
+    return rows
+
+
+def all_links_for_reparse(db_path: str | Path) -> list[sqlite3.Row]:
+    """Every link with a caption, ignoring the parsed_at cache.
+
+    Only for a deliberate re-parse after the prompt or storage rules change;
+    it re-spends quota, which normal operation never does.
+    """
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, platform, title, caption FROM links ORDER BY id"
+        ).fetchall()
+    logger.info("%d link(s) selected for forced re-parse", len(rows))
+    return rows
+
+
 def links_missing_metadata(db_path: str | Path) -> list[sqlite3.Row]:
     """Rows stored before extraction ran, i.e. with no canonical URL yet."""
     with connect(db_path) as conn:
@@ -201,8 +307,9 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "tags, added_by, added_at, done, done_at, done_by, rating, note, "
-            "photo_file_id, event_start, event_end, is_evergreen "
+            "region, lat, lng, tags, added_by, added_at, done, done_at, done_by, "
+            "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
+            "parsed_at "
             "FROM links ORDER BY added_at DESC, id DESC"
         ).fetchall()
     logger.info("listed %d link(s)", len(rows))
@@ -213,8 +320,9 @@ def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "tags, added_by, added_at, done, done_at, done_by, rating, note, "
-            "photo_file_id, event_start, event_end, is_evergreen "
+            "region, lat, lng, tags, added_by, added_at, done, done_at, done_by, "
+            "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
+            "parsed_at "
             "FROM links WHERE id = ?",
             (link_id,),
         ).fetchone()

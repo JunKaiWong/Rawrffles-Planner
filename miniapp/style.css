@@ -263,6 +263,16 @@ body {
   color: #d2438f;
 }
 
+/* Outside the home region - kept, but not clustered into a Saturday plan. */
+.badge--daytrip {
+  background: rgba(245, 159, 11, 0.2);
+  color: #b97708;
+}
+
+.meta__item--dates {
+  font-weight: 600;
+}
+
 .card__done-details {
   display: flex;
   flex-wrap: wrap;

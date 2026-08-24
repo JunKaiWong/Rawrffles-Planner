@@ -28,6 +28,8 @@ class Settings:
     webhook_port: int = 8443
     webhook_secret: str | None = None
     db_path: Path = PROJECT_ROOT / "planner.db"
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
 
 
 def _require(name: str, env_file: str) -> str:
@@ -91,4 +93,8 @@ def load_settings(env_file: str | None = None) -> Settings:
         webhook_secret=(os.getenv("WEBHOOK_SECRET") or "").strip() or None,
         db_path=Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db"),
         allowed_user_ids=_parse_user_ids(os.getenv("ALLOWED_USER_IDS") or ""),
+        # Absent key is not fatal: link capture still works, captions simply go
+        # unparsed until one is configured.
+        gemini_api_key=(os.getenv("GEMINI_API_KEY") or "").strip() or None,
+        gemini_model=(os.getenv("GEMINI_MODEL") or "gemini-3.6-flash").strip(),
     )

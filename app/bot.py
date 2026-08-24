@@ -50,8 +50,9 @@ def build_application(settings: Settings) -> Application:
     """Assemble the bot with handlers registered. Transport-agnostic."""
     application = Application.builder().token(settings.bot_token).build()
 
-    # Handlers read the DB location from here rather than importing settings.
+    # Handlers read configuration from here rather than importing settings.
     application.bot_data["db_path"] = settings.db_path
+    application.bot_data["settings"] = settings
 
     # Every handler is AND-ed with the allowlist, so no update from another chat
     # can reach handler code.

@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS links (
     photo_file_id  TEXT,                      -- Telegram file_id, never image bytes
     event_start    TEXT,                      -- NULL when evergreen
     event_end      TEXT,
-    is_evergreen   INTEGER NOT NULL DEFAULT 1
+    is_evergreen   INTEGER NOT NULL DEFAULT 1,
+    region         TEXT,                      -- country, e.g. 'Singapore'
+    lat            REAL,                      -- set by geocoding, not yet built
+    lng            REAL,
+    parsed_at      TEXT                       -- caption parse cache marker
 );
 
 -- Dedup lookups on intake, and the Mini App's To visit / Done split.
