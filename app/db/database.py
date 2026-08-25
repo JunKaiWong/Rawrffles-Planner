@@ -489,4 +489,7 @@ def update_link(
 
 def count_links(db_path: str | Path) -> int:
     with connect(db_path) as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM links").fetchone()[0])
+        # Named rather than positional: psycopg returns mappings, where [0]
+        # would be a missing key rather than the first column.
+        row = conn.execute("SELECT COUNT(*) AS n FROM links").fetchone()
+    return int(dict(row)["n"])
