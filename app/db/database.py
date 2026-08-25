@@ -352,6 +352,26 @@ def links_needing_caption_parse(db_path: str | Path) -> list[sqlite3.Row]:
     return rows
 
 
+def links_needing_extraction_retry(db_path: str | Path) -> list[sqlite3.Row]:
+    """Links yt-dlp could not read, and for which no screenshot exists.
+
+    `caption` is written only by the extractor, so an empty one means yt-dlp
+    returned nothing for this link. A link with screenshots is excluded because
+    the vision path has already supplied its content - retrying the extractor
+    there would spend time to learn nothing new.
+    """
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, canonical_url, platform, title, caption, parsed_at "
+            "FROM links "
+            "WHERE (caption IS NULL OR caption = '') "
+            "  AND (photo_file_id IS NULL OR photo_file_id = '') "
+            "ORDER BY id"
+        ).fetchall()
+    logger.info("%d link(s) eligible for an extraction retry", len(rows))
+    return rows
+
+
 def all_links_for_reparse(db_path: str | Path) -> list[sqlite3.Row]:
     """Every link with a caption, ignoring the parsed_at cache.
 

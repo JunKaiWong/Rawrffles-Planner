@@ -16,6 +16,7 @@ that happened while nobody was watching can still be traced afterwards.
 import logging
 import logging.handlers
 import sys
+from datetime import time as dt_time
 from pathlib import Path
 
 from telegram import Update
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 PING_PATTERN = r"(?i)^\s*ping\s*$"
 LOG_FILE = PROJECT_ROOT / "logs" / "bot.log"
+
+# Weekly yt-dlp refresh: Monday (0 = Monday in PTB's run_daily) at 04:15.
+EXTRACTOR_REFRESH_DAY = 0
+EXTRACTOR_REFRESH_TIME = dt_time(hour=4, minute=15)
 
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -85,6 +90,7 @@ def build_application(settings: Settings) -> Application:
         )
     )
     application.add_error_handler(on_error)
+    _schedule_jobs(application)
 
     logger.info(
         "application built: %d handler(s), allowlisted chat=%s, db=%s",
@@ -93,6 +99,42 @@ def build_application(settings: Settings) -> Application:
         settings.db_path,
     )
     return application
+
+
+def _schedule_jobs(application: Application) -> None:
+    """Register recurring maintenance jobs.
+
+    The extractor refresh runs weekly because TikTok and Instagram break
+    yt-dlp's extractors when they change their pages, and upstream patches
+    follow within days - a stale yt-dlp is a recurring cause of links stored
+    with no metadata. It runs early on Monday, when nobody is waiting on the
+    bot and a slow pip install costs nothing.
+    """
+    job_queue = application.job_queue
+    if job_queue is None:  # pragma: no cover - only without the job-queue extra
+        logger.warning("no job queue available; scheduled jobs are disabled")
+        return
+
+    async def _refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
+        from app.jobs.refresh_extractor import run_scheduled
+
+        try:
+            await run_scheduled(context.bot_data.get("settings"))
+        except Exception:
+            # A maintenance job must never take the bot down with it.
+            logger.exception("scheduled extractor refresh failed")
+
+    job_queue.run_daily(
+        _refresh,
+        time=EXTRACTOR_REFRESH_TIME,
+        days=(EXTRACTOR_REFRESH_DAY,),
+        name="refresh-extractor",
+    )
+    logger.info(
+        "scheduled extractor refresh: weekly, day=%s at %s",
+        EXTRACTOR_REFRESH_DAY,
+        EXTRACTOR_REFRESH_TIME,
+    )
 
 
 def run(settings: Settings | None = None) -> None:
