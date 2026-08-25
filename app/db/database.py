@@ -291,17 +291,50 @@ def save_caption_parse(
     )
 
 
-def set_photo_file_id(db_path: str | Path, link_id: int, photo_file_id: str) -> None:
-    """Attach a screenshot to an existing link.
+def split_file_ids(value: str | None) -> list[str]:
+    """Read the comma-separated photo_file_id column.
 
-    The usual sequence is: the URL is pasted (photo posts yield no metadata),
-    and the screenshot arrives afterwards to supply what yt-dlp could not read.
+    One column holds several ids because a slideshow post is several slides of
+    one post - they belong to the same link, not to separate rows. Telegram
+    file_ids are base64url-ish and never contain a comma, so the split is safe.
     """
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def add_photo_file_ids(
+    db_path: str | Path, link_id: int, file_ids: list[str]
+) -> list[str]:
+    """Append screenshots to a link, ignoring ones already attached.
+
+    Returns the ids that were actually new, so the caller can decide whether
+    anything changed and a re-parse is warranted.
+    """
+    if not file_ids:
+        return []
     with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT photo_file_id FROM links WHERE id = ?", (link_id,)
+        ).fetchone()
+        if row is None:
+            return []
+        existing = split_file_ids(row["photo_file_id"])
+        added = [fid for fid in file_ids if fid not in existing]
+        if not added:
+            logger.info("link id=%s already has these screenshot(s)", link_id)
+            return []
         conn.execute(
-            "UPDATE links SET photo_file_id = ? WHERE id = ?", (photo_file_id, link_id)
+            "UPDATE links SET photo_file_id = ? WHERE id = ?",
+            (",".join(existing + added), link_id),
         )
-    logger.info("attached photo to link id=%s", link_id)
+    logger.info(
+        "attached %d screenshot(s) to link id=%s (now %d)",
+        len(added),
+        link_id,
+        len(existing) + len(added),
+    )
+    return added
 
 
 def links_needing_caption_parse(db_path: str | Path) -> list[sqlite3.Row]:

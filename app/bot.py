@@ -67,11 +67,20 @@ def build_application(settings: Settings) -> Application:
     # Link intake matches message text or a photo/video caption. Only the first
     # matching handler runs, and 'ping' is registered above, so the two cannot
     # both fire on one message.
+    #
+    # filters.PHOTO is included deliberately: Telegram delivers an album as
+    # several messages sharing a media_group_id, and only one of them carries
+    # the caption, so the caption-less members would never reach the handler
+    # otherwise. The handler ignores photos that turn out to have no link.
     application.add_handler(
         MessageHandler(
             only_our_group
             & ~filters.COMMAND
-            & (filters.Regex(LINK_PATTERN) | filters.CaptionRegex(LINK_PATTERN)),
+            & (
+                filters.Regex(LINK_PATTERN)
+                | filters.CaptionRegex(LINK_PATTERN)
+                | filters.PHOTO
+            ),
             handle_links,
         )
     )

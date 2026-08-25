@@ -23,13 +23,14 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from app.db.database import (
+    add_photo_file_ids,
     find_link_by_canonical_url,
     find_link_by_url,
     get_link,
     insert_link,
     is_day_trip,
     save_caption_parse,
-    set_photo_file_id,
+    split_file_ids,
 )
 from app.services.caption_parser import parse_caption_async
 from app.services.extractor import extract_async
@@ -62,6 +63,22 @@ _PLATFORM_BY_DOMAIN = {
 }
 
 PLATFORM_LABELS = {"tiktok": "TikTok", "instagram": "Instagram"}
+
+# Telegram delivers an album as separate messages sharing a media_group_id,
+# and usually only one of them carries the caption. They arrive back-to-back,
+# so the group is buffered briefly and processed once the flow stops - which
+# is also what keeps several slides to a single Gemini call.
+MEDIA_GROUP_DEBOUNCE_SECONDS = 2.5
+MAX_IMAGES_PER_POST = 6
+
+# Sending a screenshot for a link that already has one is skipped by default so
+# a re-send cannot re-spend quota. This marker in the caption says "I mean it",
+# adding the slide and re-reading the post.
+ADD_PHOTO_MARKER = re.compile(r"(?:^|\s)(?:/addphoto|\+photo)(?:\s|$)", re.IGNORECASE)
+
+# Buffered album messages, keyed by (chat_id, media_group_id). Handlers run
+# sequentially by default, so a plain dict needs no lock.
+_pending_media_groups: dict[tuple[int, str], dict] = {}
 
 
 def normalise_url(raw: str) -> str:
@@ -96,34 +113,101 @@ def _describe(url: str, platform: str) -> str:
     return f"{_platform_label(platform)} - {url}"
 
 
-async def _fetch_photo(context, message) -> tuple[str | None, bytes | None]:
-    """Return (file_id, image bytes) for a photo message, or (None, None).
-
-    Telegram sends several sizes; the last is the largest. Only the file_id is
-    stored - Telegram re-serves the image on demand, so the bytes are used for
-    this one parse and then discarded rather than costing us storage.
-    """
+def _photo_file_id(message) -> str | None:
+    """Largest available size of a photo message, or None."""
     photos = getattr(message, "photo", None)
     if not photos:
-        return None, None
+        return None
+    return photos[-1].file_id  # Telegram orders sizes smallest to largest.
 
-    largest = photos[-1]
-    file_id = largest.file_id
-    try:
-        telegram_file = await context.bot.get_file(file_id)
-        image = bytes(await telegram_file.download_as_bytearray())
-    except Exception:
-        # The file_id is still worth keeping even if the download failed: the
-        # Mini App can render it later.
-        logger.exception("could not download photo file_id=%s", file_id)
-        return file_id, None
 
-    logger.info("downloaded photo file_id=%s (%d bytes)", file_id, len(image))
-    return file_id, image
+async def _download_images(context, file_ids: list[str]) -> list[bytes]:
+    """Fetch image bytes for the parse.
+
+    Only file_ids are persisted - Telegram re-serves the images on demand - so
+    these bytes live just long enough for one call. A failed download is
+    skipped rather than aborting: three slides minus one still describes the
+    post.
+    """
+    images: list[bytes] = []
+    for file_id in file_ids[:MAX_IMAGES_PER_POST]:
+        try:
+            telegram_file = await context.bot.get_file(file_id)
+            data = bytes(await telegram_file.download_as_bytearray())
+        except Exception:
+            logger.exception("could not download photo file_id=%s", file_id)
+            continue
+        logger.info("downloaded photo file_id=%s (%d bytes)", file_id, len(data))
+        images.append(data)
+    if len(file_ids) > MAX_IMAGES_PER_POST:
+        logger.info(
+            "message carried %d images; using the first %d",
+            len(file_ids),
+            MAX_IMAGES_PER_POST,
+        )
+    return images
+
+
+async def _flush_media_group(context) -> None:
+    """Process one buffered album as a single post."""
+    key = context.job.data
+    pending = _pending_media_groups.pop(key, None)
+    if not pending:
+        return
+
+    file_ids = pending["file_ids"]
+    caption = pending["caption"]
+    message = pending["message"]
+    logger.info(
+        "media group %s complete: %d photo(s), caption=%r",
+        key[1],
+        len(file_ids),
+        (caption or "")[:80],
+    )
+
+    if not extract_links(caption or ""):
+        # An ordinary photo album with no link in any caption: not ours.
+        logger.info("media group %s has no supported link; ignoring", key[1])
+        return
+
+    await _run_intake(context, message, caption or "", file_ids)
+
+
+async def _buffer_media_group(context, message) -> None:
+    """Collect album members, restarting the timer as each one arrives.
+
+    Only one message in an album carries the caption, so every member must be
+    buffered and the caption taken from whichever has it.
+    """
+    key = (message.chat.id, message.media_group_id)
+    file_id = _photo_file_id(message)
+    pending = _pending_media_groups.get(key)
+
+    if pending is None:
+        pending = {"file_ids": [], "caption": None, "message": message, "job": None}
+        _pending_media_groups[key] = pending
+
+    if file_id and file_id not in pending["file_ids"]:
+        pending["file_ids"].append(file_id)
+    caption = (message.caption or "").strip()
+    if caption and not pending["caption"]:
+        pending["caption"] = caption
+        # Reply to the message that carried the caption; it reads naturally.
+        pending["message"] = message
+
+    # Restart the debounce so the group is processed only once it stops growing.
+    if pending["job"] is not None:
+        pending["job"].schedule_removal()
+    pending["job"] = context.job_queue.run_once(
+        _flush_media_group, MEDIA_GROUP_DEBOUNCE_SECONDS, data=key
+    )
+    logger.debug(
+        "buffered media group %s (%d photo(s) so far)", key[1], len(pending["file_ids"])
+    )
 
 
 async def _parse_and_store(
-    context, db_path, link_id: int, platform: str, metadata, image_bytes=None
+    context, db_path, link_id: int, platform: str, metadata, images=None
 ):
     """Parse the caption once and cache it. Returns the parse, or None.
 
@@ -142,7 +226,7 @@ async def _parse_and_store(
         model_name=settings.gemini_model,
         title=metadata.title,
         platform=platform,
-        image_bytes=image_bytes,
+        images=images,
     )
     if not parsed.ok:
         # parsed_at stays NULL so a later backfill can retry this one.
@@ -165,37 +249,54 @@ async def _parse_and_store(
     return parsed
 
 
-async def _enrich_existing(context, db_path, existing_id: int, platform: str, photo_file_id, image_bytes):
-    """Use a screenshot to fill in a link that was already saved.
+async def _enrich_existing(
+    context, db_path, existing_id: int, platform: str, file_ids, images, force: bool
+):
+    """Use screenshots to fill in a link that was already saved.
 
     The normal sequence for a photo/slideshow post is two messages: the URL
     first, which yt-dlp cannot read and so stores almost nothing, then the
-    screenshot. Treating the second as a bare duplicate would throw away the
-    only content this post will ever have.
+    screenshots. Treating those as bare duplicates would throw away the only
+    content this post will ever have.
 
-    Only links without a screenshot are enriched, so re-sending an image does
-    not re-spend quota.
+    A link with no screenshot yet is always enriched. One that already has some
+    is left alone unless `force` is set, so an accidental re-send cannot
+    re-spend quota - the caption marker is how the user says they mean it.
     """
     row = get_link(db_path, existing_id)
     if row is None:
         return None
-    if row["photo_file_id"]:
-        logger.info("link id=%s already has a screenshot; not re-parsing", existing_id)
+
+    already = split_file_ids(row["photo_file_id"])
+    if already and not force:
+        logger.info(
+            "link id=%s already has %d screenshot(s); not re-parsing (use +photo to force)",
+            existing_id,
+            len(already),
+        )
         return None
 
-    if photo_file_id:
-        set_photo_file_id(db_path, existing_id, photo_file_id)
-    if image_bytes is None:
+    added = add_photo_file_ids(db_path, existing_id, file_ids)
+    if not added and already:
+        # The same screenshot again: nothing new to read.
+        logger.info("link id=%s got no new screenshots; not re-parsing", existing_id)
+        return None
+    if not images:
         return None
 
-    logger.info("enriching existing link id=%s from screenshot", existing_id)
+    logger.info(
+        "enriching existing link id=%s from %d screenshot(s)%s",
+        existing_id,
+        len(images),
+        " (forced)" if force and already else "",
+    )
 
     class _Meta:  # matches the shape _parse_and_store expects
         caption = row["caption"]
         title = row["title"]
 
     return await _parse_and_store(
-        context, db_path, existing_id, platform, _Meta(), image_bytes
+        context, db_path, existing_id, platform, _Meta(), images
     )
 
 
@@ -205,6 +306,25 @@ def _summarise_enriched(link_id: int, platform: str, parsed) -> str:
     lines = [f"  #{link_id} {_platform_label(platform)} - {headline}"]
     lines.extend(_summarise_parsed(parsed))
     return "\n".join(lines)
+
+
+def _parse_yielded_content(parsed) -> bool:
+    """Did the vision/caption parse actually learn anything?
+
+    ok=True only means the call completed - a post with nothing readable still
+    returns an empty result. "other/other" is the model's honest shrug, so it
+    does not count as content on its own.
+    """
+    if parsed is None or not parsed.ok:
+        return False
+    return bool(
+        parsed.title
+        or parsed.location
+        or parsed.tags
+        or parsed.event_start
+        or parsed.event_end
+        or (parsed.category and parsed.category != "other")
+    )
 
 
 def _summarise_parsed(parsed) -> list[str]:
@@ -225,15 +345,16 @@ def _summarise_parsed(parsed) -> list[str]:
 
 
 def _summarise_saved(
-    link_id: int, platform: str, url: str, metadata, parsed=None, from_image: bool = False
+    link_id: int, platform: str, url: str, metadata, parsed=None, image_count: int = 0
 ) -> str:
     """One confirmation entry: what was saved, and what we learned about it."""
     headline = (parsed.title if parsed and parsed.title else None) or metadata.title or url
     lines = [f"  #{link_id} {_platform_label(platform)} - {headline}"]
-    if from_image:
+    if image_count:
         # Say where the information came from, since for a photo post the
-        # screenshot is the only source there is.
-        lines.append("     read from your screenshot")
+        # screenshots are the only source there is.
+        plural = "screenshot" if image_count == 1 else f"{image_count} screenshots"
+        lines.append(f"     read from your {plural}")
 
     location = (parsed.location if parsed else None) or metadata.location
     if location:
@@ -253,31 +374,69 @@ def _summarise_saved(
         # Say it plainly: this one will not be clustered into a Saturday plan.
         lines.append("     day trip - outside Singapore")
 
-    if not metadata.ok:
-        # Be explicit rather than silently storing a bare URL.
-        lines.append("     (saved, but metadata could not be read)")
+    # Report the outcome, not the stage. yt-dlp failing is routine and
+    # uninteresting when the screenshots supplied the facts instead; only say
+    # something went unread when nothing was learned from any source.
+    if not _parse_yielded_content(parsed) and not (metadata.title or metadata.caption):
+        if image_count:
+            lines.append("     saved, but nothing readable in the screenshots")
+        else:
+            lines.append(
+                "     saved, but nothing could be read - reply with a screenshot"
+            )
+            lines.append("     (photo + this URL in the caption) to fill it in")
     return "\n".join(lines)
 
 
 async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Store every supported link in the message and confirm what was saved."""
+    """Entry point: route albums to the buffer, everything else straight through."""
     message = update.effective_message
     if message is None:
         return
 
+    # An album arrives as several messages; collect them before doing anything,
+    # so all its slides reach Gemini in one call.
+    if getattr(message, "media_group_id", None):
+        await _buffer_media_group(context, message)
+        return
+
+    text = message.text or message.caption or ""
+    file_id = _photo_file_id(message)
+    if not extract_links(text):
+        # A lone photo with no link: the filter admits photos so album members
+        # without captions can be buffered, so this is the expected non-match.
+        logger.debug("message_id=%s has no supported link; ignoring", message.message_id)
+        return
+
+    await _run_intake(context, message, text, [file_id] if file_id else [])
+
+
+async def _run_intake(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+    text: str,
+    photo_file_ids: list[str],
+) -> None:
+    """Store every supported link and confirm what was saved."""
     db_path = context.bot_data["db_path"]
     user = message.from_user
     added_by = user.id if user else 0
-    text = message.text or message.caption or ""
 
     logger.info(
-        "link intake: chat=%s message_id=%s from=%s(%s)",
-        update.effective_chat.id,
+        "link intake: chat=%s message_id=%s from=%s(%s) photos=%d",
+        message.chat.id,
         message.message_id,
         added_by,
         user.first_name if user else "unknown",
+        len(photo_file_ids),
     )
     logger.debug("message text: %r", text)
+
+    # An explicit marker in the caption means "add this slide even though the
+    # link already has one", which is otherwise skipped to protect quota.
+    force_add = bool(ADD_PHOTO_MARKER.search(text))
+    if force_add:
+        logger.info("caption carries the add-photo marker; forcing re-read")
 
     links = extract_links(text)
     if not links:
@@ -304,16 +463,9 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:  # noqa: BLE001 - cosmetic only
         logger.debug("could not send typing action", exc_info=True)
 
-    # A screenshot sent with the URL in its caption is how photo/slideshow
+    # Screenshots sent with the URL in the caption are how photo/slideshow
     # posts get their content to us, since yt-dlp cannot read them.
-    photo_file_id, image_bytes = await _fetch_photo(context, message)
-    if photo_file_id:
-        logger.info(
-            "message_id=%s carries a photo (file_id=%s, downloaded=%s)",
-            message.message_id,
-            photo_file_id,
-            image_bytes is not None,
-        )
+    images = await _download_images(context, photo_file_ids) if photo_file_ids else []
 
     for url, platform in links:
         try:
@@ -327,7 +479,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     existing["added_at"],
                 )
                 enriched = await _enrich_existing(
-                    context, db_path, existing["id"], platform, photo_file_id, image_bytes
+                    context, db_path, existing["id"], platform, photo_file_ids, images, force_add
                 )
                 if enriched:
                     updated.append(_summarise_enriched(existing["id"], platform, enriched))
@@ -353,7 +505,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     # A screenshot for a link we already hold is the point of
                     # the photo workflow, not a duplicate to discard.
                     enriched = await _enrich_existing(
-                        context, db_path, existing["id"], platform, photo_file_id, image_bytes
+                        context, db_path, existing["id"], platform, photo_file_ids, images, force_add
                     )
                     if enriched:
                         updated.append(_summarise_enriched(existing["id"], platform, enriched))
@@ -373,18 +525,18 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 title=metadata.title,
                 caption=metadata.caption,
                 location=metadata.location,
-                photo_file_id=photo_file_id,
+                photo_file_id=",".join(photo_file_ids) or None,
             )
             # Caption parse runs once, here at intake, and the result is cached
             # on the row. Planning never re-parses. A screenshot rides along in
             # that same call rather than costing a second one.
             parsed = None
-            if metadata.caption or metadata.title or image_bytes:
+            if metadata.caption or metadata.title or images:
                 parsed = await _parse_and_store(
-                    context, db_path, link_id, platform, metadata, image_bytes
+                    context, db_path, link_id, platform, metadata, images
                 )
             saved.append(
-                _summarise_saved(link_id, platform, url, metadata, parsed, bool(image_bytes))
+                _summarise_saved(link_id, platform, url, metadata, parsed, len(images))
             )
         except Exception:
             # Never let one bad link kill the rest of the message.
@@ -402,6 +554,9 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if duplicates:
         lines.append(f"Already saved ({len(duplicates)}):")
         lines.extend(duplicates)
+        if images:
+            # The screenshots were skipped, so say how to override.
+            lines.append("  (add +photo to the caption to attach these anyway)")
     if failed:
         lines.append(f"Could not save ({len(failed)}) - check the logs:")
         lines.extend(failed)

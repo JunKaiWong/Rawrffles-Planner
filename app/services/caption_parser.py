@@ -125,11 +125,17 @@ Caption:
 # and send it with the URL in the caption - which means the image, not the
 # caption, carries the actual content.
 IMAGE_NOTE = """\
-An image is attached: a screenshot of the post, supplied because this post type
-cannot be read automatically. Treat the image as the primary source and read any
-text in it. The caption below may contain nothing but the post URL.
+{count} attached: screenshots of the post, supplied because this post type
+cannot be read automatically. Treat them as the primary source and read any text
+in them. They are slides of ONE post describing a single place or event, so
+combine what they say into one answer rather than describing them separately.
+The caption below may contain nothing but the post URL.
 
 """
+
+
+def _describe_image_count(count: int) -> str:
+    return "An image is" if count == 1 else f"{count} images are"
 
 
 @dataclass(frozen=True)
@@ -261,18 +267,21 @@ def parse_caption(
     title: str | None = None,
     platform: str | None = None,
     today: date | None = None,
-    image_bytes: bytes | None = None,
+    images: list[bytes] | None = None,
     image_mime: str = "image/jpeg",
 ) -> ParsedCaption:
     """Blocking parse of one post. Never raises.
 
-    When `image_bytes` is supplied the image is sent alongside the same prompt,
-    in the *same* call - vision and text are one request, never two, because
-    the free tier's daily quota is the binding constraint. The schema and
-    taxonomy are identical either way, so both paths produce one shape.
+    When `images` are supplied they are sent alongside the same prompt in the
+    *same* call - one request no matter how many slides, because the free
+    tier's daily quota is the binding constraint. A slideshow post shares one
+    set of facts across its slides, so several images still describe a single
+    place or event and yield a single JSON object. The schema and taxonomy are
+    identical to the text-only path, so both produce one shape.
     """
+    images = [img for img in (images or []) if img]
     source = (caption or "").strip() or (title or "").strip()
-    if not source and not image_bytes:
+    if not source and not images:
         # Nothing to work with, and no reason to spend a call finding that out.
         logger.info("no caption, title or image to parse; skipping model call")
         return ParsedCaption(ok=True, error=None)
@@ -285,7 +294,9 @@ def parse_caption(
         categories=" | ".join(CATEGORIES),
         taxonomy=_TAXONOMY_BLOCK,
         max_tags=MAX_TAGS,
-        image_note=IMAGE_NOTE if image_bytes else "",
+        image_note=IMAGE_NOTE.format(count=_describe_image_count(len(images)))
+        if images
+        else "",
     )
 
     try:
@@ -303,14 +314,18 @@ def parse_caption(
         logger.exception("could not create Gemini client")
         return ParsedCaption(ok=False, error=f"{type(exc).__name__}: {exc}")
 
-    # One request carries both the screenshot and the prompt.
-    contents = (
-        [genai_types.Part.from_bytes(data=image_bytes, mime_type=image_mime), prompt]
-        if image_bytes
-        else prompt
-    )
-    if image_bytes:
-        logger.info("parsing with attached image (%d bytes, %s)", len(image_bytes), image_mime)
+    # One request carries every screenshot plus the prompt.
+    contents = prompt
+    if images:
+        contents = [
+            genai_types.Part.from_bytes(data=image, mime_type=image_mime)
+            for image in images
+        ] + [prompt]
+        logger.info(
+            "parsing with %d attached image(s), %d bytes total",
+            len(images),
+            sum(len(i) for i in images),
+        )
 
     raw = None
     for attempt in range(TRANSIENT_RETRIES + 1):
@@ -394,7 +409,7 @@ async def parse_caption_async(
     title: str | None = None,
     platform: str | None = None,
     today: date | None = None,
-    image_bytes: bytes | None = None,
+    images: list[bytes] | None = None,
     image_mime: str = "image/jpeg",
 ) -> ParsedCaption:
     """Run `parse_caption` off the event loop so the bot stays responsive."""
@@ -408,7 +423,7 @@ async def parse_caption_async(
                 title,
                 platform,
                 today,
-                image_bytes,
+                images,
                 image_mime,
             ),
             timeout=PARSE_TIMEOUT_SECONDS,
