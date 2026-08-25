@@ -127,10 +127,12 @@ async def retry_failed_extractions(
 
         recovered += 1
         logger.info(
-            "id=%s recovered: title=%r caption_len=%s",
+            "id=%s recovered via %s: title=%r caption_len=%s thumbnail=%s",
             link_id,
+            metadata.source or "unknown",
             (metadata.title or "")[:60],
             len(metadata.caption) if metadata.caption else 0,
+            bool(metadata.thumbnail),
         )
 
         if dry_run:
@@ -161,12 +163,14 @@ async def retry_failed_extractions(
         if parsed_count:
             await asyncio.sleep(DELAY_BETWEEN_PARSES_SECONDS)
 
+        # The oEmbed cover image rides along in the same call as the caption.
         result = await parse_caption_async(
             metadata.caption,
             api_key=settings.gemini_api_key,
             model_name=settings.gemini_model,
             title=metadata.title,
             platform=row["platform"],
+            images=[metadata.thumbnail] if metadata.thumbnail else None,
         )
         if not result.ok:
             logger.warning("id=%s parse failed after recovery: %s", link_id, result.error)

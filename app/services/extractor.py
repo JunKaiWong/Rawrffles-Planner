@@ -26,6 +26,8 @@ Three things matter here beyond pulling fields out of yt-dlp:
 
 import asyncio
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
@@ -40,6 +42,22 @@ logger = logging.getLogger(__name__)
 EXTRACTION_TIMEOUT_SECONDS = 45
 SOCKET_TIMEOUT_SECONDS = 15
 REDIRECT_TIMEOUT_SECONDS = 10
+
+# TikTok's public oEmbed endpoint: a single unauthenticated GET that returns the
+# post's caption text, author and cover image. It is the fallback when yt-dlp's
+# TikTok extractor breaks, which happens whenever TikTok changes their page
+# structure and lasts until upstream patches it.
+OEMBED_ENDPOINT = "https://www.tiktok.com/oembed"
+OEMBED_TIMEOUT_SECONDS = 15
+# A burst of requests earns a 429, so calls are serialised with a gap between
+# them. This is a hard floor across threads, not a per-caller courtesy.
+OEMBED_MIN_INTERVAL_SECONDS = 3.0
+OEMBED_RETRY_AFTER_429_SECONDS = 20
+THUMBNAIL_TIMEOUT_SECONDS = 15
+MAX_THUMBNAIL_BYTES = 5_000_000
+
+_oembed_lock = threading.Lock()
+_oembed_last_call = 0.0
 
 # Short-link hosts are plain redirectors; a browser-ish UA avoids being served
 # a consent interstitial instead of the redirect.
@@ -65,6 +83,13 @@ class Metadata:
     caption: str | None = None
     location: str | None = None
     error: str | None = None
+    # Which path produced the metadata: "yt-dlp", "oembed", or None. Worth
+    # recording because the two differ in what they can return.
+    source: str | None = None
+    thumbnail_url: str | None = None
+    # Cover image bytes, ready to hand to the vision parse alongside any
+    # screenshots. Not persisted - only the URL is cheap to keep.
+    thumbnail: bytes | None = None
 
 
 class _YtdlpLogBridge:
@@ -160,6 +185,151 @@ def resolve_via_redirect(url: str) -> str | None:
     return resolved
 
 
+def is_tiktok(url: str | None) -> bool:
+    if not url:
+        return False
+    host = (urlparse(url).netloc or "").lower()
+    return host == "tiktok.com" or host.endswith(".tiktok.com")
+
+
+def to_www_tiktok(url: str) -> str:
+    """oEmbed rejects the bare host with a 400, so restore the www. that
+    canonicalisation strips."""
+    parts = urlparse(url)
+    if parts.netloc.lower() == "tiktok.com":
+        parts = parts._replace(netloc="www.tiktok.com")
+    return urlunparse(parts)
+
+
+def _pace_oembed() -> None:
+    """Serialise oEmbed calls with a minimum gap, across threads."""
+    global _oembed_last_call
+    with _oembed_lock:
+        wait = OEMBED_MIN_INTERVAL_SECONDS - (time.monotonic() - _oembed_last_call)
+        if wait > 0:
+            logger.debug("pacing oembed: sleeping %.1fs", wait)
+            time.sleep(wait)
+        _oembed_last_call = time.monotonic()
+
+
+def fetch_oembed(url: str) -> dict | None:
+    """Ask TikTok's oEmbed endpoint about a post. Never raises.
+
+    Returns None for anything it cannot answer, which includes photo/slideshow
+    posts - those 400 here, so screenshots remain the only route for them.
+    """
+    target = to_www_tiktok(url)
+    headers = {"User-Agent": _USER_AGENT}
+
+    for attempt in range(2):
+        _pace_oembed()
+        try:
+            response = requests.get(
+                OEMBED_ENDPOINT,
+                params={"url": target},
+                headers=headers,
+                timeout=OEMBED_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
+            logger.warning("oembed request failed for %s: %s", target, exc)
+            return None
+
+        if response.status_code == 429:
+            if attempt == 0:
+                logger.warning(
+                    "oembed rate limited, retrying in %ss", OEMBED_RETRY_AFTER_429_SECONDS
+                )
+                time.sleep(OEMBED_RETRY_AFTER_429_SECONDS)
+                continue
+            logger.warning("oembed still rate limited for %s; giving up", target)
+            return None
+        if response.status_code == 400:
+            # Expected for photo posts and removed videos.
+            logger.info("oembed has no data for %s (400)", target)
+            return None
+        if not response.ok:
+            logger.warning("oembed returned %s for %s", response.status_code, target)
+            return None
+
+        try:
+            payload = response.json()
+        except ValueError:
+            logger.warning("oembed returned non-JSON for %s", target)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        logger.info(
+            "oembed hit for %s: author=%r title_len=%s",
+            target,
+            payload.get("author_name"),
+            len(payload.get("title") or ""),
+        )
+        return payload
+    return None
+
+
+def fetch_thumbnail(url: str) -> bytes | None:
+    """Download a cover image so it can go through the vision parse.
+
+    A TikTok cover is the post's first frame and usually carries the on-screen
+    text, which is exactly what the caption alone leaves out.
+    """
+    try:
+        response = requests.get(
+            url, headers={"User-Agent": _USER_AGENT}, timeout=THUMBNAIL_TIMEOUT_SECONDS
+        )
+        if not response.ok:
+            logger.warning("thumbnail fetch returned %s", response.status_code)
+            return None
+        data = response.content
+    except requests.RequestException as exc:
+        logger.warning("thumbnail fetch failed: %s", exc)
+        return None
+    if not data or len(data) > MAX_THUMBNAIL_BYTES:
+        logger.warning("thumbnail missing or too large (%d bytes)", len(data or b""))
+        return None
+    logger.info("downloaded thumbnail (%d bytes)", len(data))
+    return data
+
+
+def _from_oembed(url: str, canonical: str | None, error: str | None) -> Metadata | None:
+    """Build Metadata from oEmbed, or None if it had nothing."""
+    payload = fetch_oembed(canonical or url)
+    if payload is None:
+        return None
+
+    # TikTok's oEmbed "title" is the post's caption text, not a separate
+    # headline, so it serves as both.
+    caption = _clean(payload.get("title"))
+    thumbnail_url = _clean(payload.get("thumbnail_url"))
+    thumbnail = fetch_thumbnail(thumbnail_url) if thumbnail_url else None
+
+    if not caption and not thumbnail:
+        logger.info("oembed returned nothing usable for %s", url)
+        return None
+
+    metadata = Metadata(
+        raw_url=url,
+        ok=True,
+        canonical_url=canonical,
+        title=caption,
+        caption=caption,
+        source="oembed",
+        thumbnail_url=thumbnail_url,
+        thumbnail=thumbnail,
+        # Keep the yt-dlp error: the fallback worked, but knowing the primary
+        # path is broken is what tells us when it recovers.
+        error=error,
+    )
+    logger.info(
+        "recovered %s via oembed: caption_len=%s thumbnail=%s",
+        url,
+        len(caption) if caption else 0,
+        bool(thumbnail),
+    )
+    return metadata
+
+
 def _location_from(info: dict) -> str | None:
     """Best-effort location.
 
@@ -204,8 +374,14 @@ def extract(url: str) -> Metadata:
         # it separately so de-duplication still works for this link.
         canonical = canonicalise(resolve_via_redirect(url))
         logger.info(
-            "extraction failed for %s; canonical=%s (from redirect)", url, canonical
+            "yt-dlp extraction failed for %s; canonical=%s (from redirect)", url, canonical
         )
+        # TikTok's extractor breaks whenever they change their pages. oEmbed is
+        # a different, far simpler surface and usually still answers.
+        if is_tiktok(canonical or url):
+            recovered = _from_oembed(url, canonical, error)
+            if recovered is not None:
+                return recovered
         return Metadata(raw_url=url, ok=False, canonical_url=canonical, error=error)
 
     canonical = canonicalise(
@@ -219,6 +395,7 @@ def extract(url: str) -> Metadata:
         title=_clean(info.get("title")),
         caption=_clean(info.get("description")),
         location=_location_from(info),
+        source="yt-dlp",
     )
     logger.info(
         "extracted %s -> canonical=%s title=%r location=%r caption_len=%s",

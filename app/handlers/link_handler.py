@@ -220,13 +220,22 @@ async def _parse_and_store(
         logger.warning("no GEMINI_API_KEY configured; skipping caption parse for id=%s", link_id)
         return None
 
+    # A cover image from oEmbed goes through the same vision call as any
+    # screenshots: a TikTok cover is the first frame and usually carries the
+    # on-screen text the caption leaves out. Still one call.
+    all_images = list(images or [])
+    thumbnail = getattr(metadata, "thumbnail", None)
+    if thumbnail:
+        all_images.append(thumbnail)
+        logger.info("including oEmbed cover image in the parse for id=%s", link_id)
+
     parsed = await parse_caption_async(
         metadata.caption,
         api_key=api_key,
         model_name=settings.gemini_model,
         title=metadata.title,
         platform=platform,
-        images=images,
+        images=all_images,
     )
     if not parsed.ok:
         # parsed_at stays NULL so a later backfill can retry this one.
@@ -531,7 +540,7 @@ async def _run_intake(
             # on the row. Planning never re-parses. A screenshot rides along in
             # that same call rather than costing a second one.
             parsed = None
-            if metadata.caption or metadata.title or images:
+            if metadata.caption or metadata.title or images or metadata.thumbnail:
                 parsed = await _parse_and_store(
                     context, db_path, link_id, platform, metadata, images
                 )
