@@ -1,0 +1,47 @@
+# Render blueprint: one web service running the API, the Mini App and the
+# Telegram webhook in a single process.
+#
+# The free plan has no persistent disk, which is why the database is Neon
+# Postgres rather than the SQLite file - a file here is erased on every
+# redeploy. It also spins the service down after ~15 minutes idle, so the first
+# Telegram message after a quiet spell takes about a minute to arrive while the
+# service wakes. Scheduled work therefore lives in GitHub Actions, since a
+# sleeping service fires no timers.
+#
+# Secrets are marked sync:false: Render prompts for them once and stores them,
+# so nothing sensitive lives in this file or in git.
+
+services:
+  - type: web
+    name: rawrffles-planner
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    # $PORT is supplied by Render.
+    startCommand: uvicorn app.api:create_app --factory --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+      - key: TELEGRAM_TRANSPORT
+        value: webhook
+      # Must match the service's public URL; the webhook path is appended.
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      # Change this one if adding a member converts the group to a supergroup.
+      # Send /chatid in the group to read the current value.
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash

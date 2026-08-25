@@ -10,14 +10,15 @@ can be traced back to a specific update in the log.
 
 import logging
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+
+from app.db.engine import connect, describe, is_postgres
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+POSTGRES_SCHEMA_PATH = Path(__file__).with_name("schema_postgres.sql")
 
 # Columns added after the first release. schema.sql creates them for new
 # databases; existing ones are patched by _migrate(), since
@@ -56,22 +57,6 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-@contextmanager
-def connect(db_path: str | Path) -> Iterator[sqlite3.Connection]:
-    """Open a connection, commit on success, roll back and log on failure."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        logger.exception("database operation failed, rolled back (db=%s)", db_path)
-        raise
-    finally:
-        conn.close()
-
-
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing from an older database. Additive only - no data is
     rewritten or dropped, so this is safe to run on every startup."""
@@ -86,13 +71,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def init_db(db_path: str | Path) -> None:
-    """Create tables if absent, then apply additive migrations."""
+    """Create tables if absent, then apply additive migrations.
+
+    The Postgres schema is written with every column present, so it needs no
+    incremental migration; only the SQLite file, which predates several
+    columns, is patched in place.
+    """
+    logger.info("initialising database at %s", describe(db_path))
+
+    if is_postgres(db_path):
+        with connect(db_path) as conn:
+            conn.executescript(POSTGRES_SCHEMA_PATH.read_text(encoding="utf-8"))
+            tables = [
+                dict(row)["table_name"]
+                for row in conn.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' ORDER BY table_name"
+                )
+            ]
+        logger.info("database ready (postgres), tables: %s", ", ".join(tables))
+        return
+
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("initialising database at %s", path.resolve())
-    schema = SCHEMA_PATH.read_text(encoding="utf-8")
     with connect(path) as conn:
-        conn.executescript(schema)
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate(conn)
         tables = [
             row["name"]
@@ -100,7 +103,7 @@ def init_db(db_path: str | Path) -> None:
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
             )
         ]
-    logger.info("database ready, tables: %s", ", ".join(tables))
+    logger.info("database ready (sqlite), tables: %s", ", ".join(tables))
 
 
 def find_link_by_url(db_path: str | Path, url: str) -> sqlite3.Row | None:
@@ -160,7 +163,7 @@ def insert_link(
         cursor = conn.execute(
             "INSERT INTO links (url, canonical_url, platform, title, caption, "
             "location, photo_file_id, added_by, added_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 url,
                 canonical_url,
@@ -173,7 +176,9 @@ def insert_link(
                 added_at,
             ),
         )
-        link_id = int(cursor.lastrowid)
+        # RETURNING rather than lastrowid: supported by Postgres and by SQLite
+        # since 3.35, so one statement serves both engines.
+        link_id = int(dict(cursor.fetchone())["id"])
     logger.info(
         "stored link id=%s platform=%s added_by=%s url=%s canonical=%s "
         "title=%r caption_len=%s location=%r",
@@ -268,7 +273,7 @@ def save_caption_parse(
                 region,
                 event_start,
                 event_end,
-                1 if is_evergreen else 0,
+                bool(is_evergreen),
                 category,
                 subcategory,
                 tags_value,
@@ -452,11 +457,11 @@ def update_link(
     updates = dict(changes)
     if "done" in updates:
         if updates["done"]:
-            updates["done"] = 1
+            updates["done"] = True
             updates["done_at"] = utc_now_iso()
             updates["done_by"] = acting_user_id
         else:
-            updates["done"] = 0
+            updates["done"] = False
             updates["done_at"] = None
             updates["done_by"] = None
 

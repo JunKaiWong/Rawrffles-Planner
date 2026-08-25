@@ -20,7 +20,13 @@ from datetime import time as dt_time
 from pathlib import Path
 
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from app.auth import allowed_chat_filter
 from app.config import POLLING, PROJECT_ROOT, WEBHOOK, Settings, load_settings
@@ -44,6 +50,65 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     logger.info("ping from chat %s", update.effective_chat.id)
     await message.reply_text("pong")
+
+
+async def chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report this chat's id.
+
+    Deliberately NOT behind the allowlist. Adding a member can convert a group
+    to a supergroup, which changes its id - and at that moment the new chat is
+    not allowlisted, so an allowlisted-only command could never tell you the
+    new value. It reveals only the id of a chat the caller is already in.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    chat = update.effective_chat
+    allowed = context.bot_data.get("settings")
+    configured = getattr(allowed, "chat_id", None)
+    matches = chat.id == configured
+    logger.info("/chatid in chat %s (type=%s, matches config=%s)", chat.id, chat.type, matches)
+    await message.reply_text(
+        f"Chat id: {chat.id}\n"
+        f"Type: {chat.type}\n"
+        + (
+            "This matches TELEGRAM_CHAT_ID - nothing to do."
+            if matches
+            else "This does NOT match TELEGRAM_CHAT_ID.\n"
+            "Set TELEGRAM_CHAT_ID to the value above and redeploy."
+        )
+    )
+
+
+async def on_migration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Notice a group being upgraded to a supergroup.
+
+    Telegram changes the chat id when this happens and the old id stops
+    receiving messages, so the bot would appear to simply die. Log it loudly
+    and say so in the chat while the old id still works.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    new_id = getattr(message, "migrate_to_chat_id", None)
+    if not new_id:
+        return
+    logger.warning(
+        "GROUP MIGRATED TO SUPERGROUP: old id %s -> new id %s. "
+        "Update TELEGRAM_CHAT_ID to %s and redeploy.",
+        update.effective_chat.id,
+        new_id,
+        new_id,
+    )
+    try:
+        await message.reply_text(
+            "This group became a supergroup, so its id changed.\n"
+            f"New chat id: {new_id}\n"
+            "Set TELEGRAM_CHAT_ID to that value and redeploy, "
+            "or send /chatid here any time to see it again."
+        )
+    except Exception:
+        logger.debug("could not announce migration", exc_info=True)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -89,8 +154,22 @@ def build_application(settings: Settings) -> Application:
             handle_links,
         )
     )
+    # Unrestricted on purpose - see chat_id()'s docstring. It returns nothing
+    # but the caller's own chat id.
+    application.add_handler(CommandHandler("chatid", chat_id))
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.MIGRATE, on_migration)
+    )
+
     application.add_error_handler(on_error)
-    _schedule_jobs(application)
+
+    # Only schedule in-process when polling. A sleeping free host fires no
+    # timers, and on an always-on host this would double up with the GitHub
+    # Actions schedule that covers the deployed case.
+    if settings.transport == POLLING:
+        _schedule_jobs(application)
+    else:
+        logger.info("webhook mode: scheduled jobs are handled by GitHub Actions")
 
     logger.info(
         "application built: %d handler(s), allowlisted chat=%s, db=%s",

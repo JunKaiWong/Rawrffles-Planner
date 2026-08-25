@@ -17,9 +17,12 @@ Handlers therefore never see an unauthenticated caller.
 Run locally:  python -m app.api        (then open http://127.0.0.1:8000/docs)
 """
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
+
+from telegram import Update
 
 from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Request, status
 from fastapi.responses import JSONResponse
@@ -28,7 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.auth import InitDataError, TelegramUser, authorise_user
-from app.config import PROJECT_ROOT, Settings, load_settings
+from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
+from app.db.engine import describe
 from app.db.database import get_link, init_db, is_day_trip, list_links, update_link
 
 logger = logging.getLogger(__name__)
@@ -38,7 +42,21 @@ INIT_DATA_HEADER = "X-Telegram-Init-Data"
 # Paths that skip authentication. Deliberately tiny: the interactive docs must
 # load before the user can authorise, and the health check must work for the
 # host's uptime probe. Neither exposes any data.
-PUBLIC_PATHS = frozenset({"/docs", "/redoc", "/openapi.json", "/health", "/docs/oauth2-redirect"})
+# Telegram posts updates here. It cannot send initData, so this path is exempt
+# from the Mini App gate and protected instead by the secret token Telegram
+# echoes back, plus the chat allowlist every handler already passes through.
+TELEGRAM_WEBHOOK_PATH = "/telegram/webhook"
+
+PUBLIC_PATHS = frozenset(
+    {
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/health",
+        "/docs/oauth2-redirect",
+        TELEGRAM_WEBHOOK_PATH,
+    }
+)
 
 # Prefixes that skip authentication. The Mini App's own HTML/CSS/JS must load
 # before Telegram can hand it initData, so the static bundle is public - it
@@ -154,10 +172,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         init_db(settings.db_path)
         logger.info(
             "API ready: db=%s allowed_users=%s",
-            settings.db_path,
+            describe(settings.db_path),
             sorted(settings.allowed_user_ids),
         )
+
+        # In webhook mode the bot lives inside this same web service: one
+        # process, one port, one deployment - which is what a free host with a
+        # single web service can actually run.
+        app.state.telegram_app = None
+        if settings.transport == WEBHOOK:
+            from app.bot import build_application
+
+            telegram_app = build_application(settings)
+            await telegram_app.initialize()
+            await telegram_app.start()
+            webhook_url = settings.webhook_url.rstrip("/") + TELEGRAM_WEBHOOK_PATH
+            await telegram_app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=settings.webhook_secret,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+            )
+            app.state.telegram_app = telegram_app
+            logger.info("telegram webhook registered at %s", webhook_url)
+
         yield
+
+        telegram_app = app.state.telegram_app
+        if telegram_app is not None:
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+            logger.info("telegram application stopped")
 
     app = FastAPI(
         title="Couple's Planner API",
@@ -201,6 +246,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["meta"], summary="Liveness probe (unauthenticated)")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post(
+        TELEGRAM_WEBHOOK_PATH,
+        tags=["meta"],
+        summary="Telegram webhook (called by Telegram, not by the Mini App)",
+        include_in_schema=False,
+    )
+    async def telegram_webhook(request: Request):
+        """Feed one Telegram update into the bot.
+
+        Authenticated by the secret token Telegram echoes back, which is the
+        only credential it can carry. A wrong or missing token is refused
+        before the body is parsed.
+        """
+        telegram_app = request.app.state.telegram_app
+        if telegram_app is None:
+            # Running in polling mode; nothing should be posting here.
+            logger.warning("webhook called while not in webhook mode")
+            return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"ok": False})
+
+        if settings.webhook_secret:
+            sent = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if not sent or not hmac.compare_digest(sent, settings.webhook_secret):
+                logger.warning("webhook called with a bad secret token")
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN, content={"ok": False}
+                )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            logger.warning("webhook received a non-JSON body")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST, content={"ok": False}
+            )
+
+        update = Update.de_json(payload, telegram_app.bot)
+        # Telegram retries on a non-200, so failures are logged and swallowed
+        # rather than causing the same bad update to be redelivered forever.
+        try:
+            await telegram_app.process_update(update)
+        except Exception:
+            logger.exception("failed to process update %s", getattr(update, "update_id", "?"))
+        return {"ok": True}
 
     # Serve the Mini App from the same origin as the API so browser requests
     # need no CORS handling and Telegram loads one host.

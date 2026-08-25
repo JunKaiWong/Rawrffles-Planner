@@ -1,0 +1,67 @@
+# Scheduled maintenance, run here rather than on the host.
+#
+# Render's free plan spins the service down when idle, and a sleeping service
+# fires no timers - an in-process scheduler would simply never run. GitHub
+# Actions has its own clock and reaches Neon directly, so these jobs do not
+# depend on the web service being awake at all.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL, GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+#   ALLOWED_USER_IDS
+
+name: Scheduled jobs
+
+on:
+  schedule:
+    # Weekly: refresh yt-dlp and retry links it previously could not read.
+    # Mondays 04:15 UTC. GitHub queues cron on shared runners, so treat the
+    # time as approximate.
+    - cron: "15 4 * * 1"
+    # Daily: parse any captions still waiting, a few at a time to stay inside
+    # the Gemini free tier's daily allowance.
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Which job to run
+        required: true
+        default: captions
+        type: choice
+        options: [captions, extractor]
+
+concurrency:
+  # Two runs writing the same rows would double-spend Gemini quota.
+  group: scheduled-jobs
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ALLOWED_USER_IDS: ${{ secrets.ALLOWED_USER_IDS }}
+      GEMINI_MODEL: gemini-3.6-flash
+      # The jobs read settings from the environment; there is no .env here.
+      ENV_FILE: .env.ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh yt-dlp and retry unreadable links
+        if: github.event.schedule == '15 4 * * 1' || inputs.job == 'extractor'
+        run: python -m app.jobs.refresh_extractor
+
+      - name: Parse captions still waiting
+        if: github.event.schedule == '30 5 * * *' || inputs.job == 'captions'
+        run: python -m app.jobs.backfill_captions --limit 10

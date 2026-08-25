@@ -7,3 +7,4 @@ apscheduler
 google-genai
 anthropic
 python-dotenv
+psycopg[binary]

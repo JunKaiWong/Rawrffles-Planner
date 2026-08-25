@@ -33,7 +33,11 @@ class Settings:
     webhook_url: str | None = None
     webhook_port: int = 8443
     webhook_secret: str | None = None
-    db_path: Path = PROJECT_ROOT / "planner.db"
+    # Either a Postgres URL or a path to the SQLite file. SQLite remains the
+    # local default and the fallback; the deployed host has no persistent disk,
+    # so it must be given a DATABASE_URL.
+    db_path: Path | str = PROJECT_ROOT / "planner.db"
+    sqlite_path: Path = PROJECT_ROOT / "planner.db"
     gemini_api_key: str | None = None
     gemini_model: str = DEFAULT_GEMINI_MODEL
 
@@ -64,6 +68,19 @@ def _parse_user_ids(raw: str) -> frozenset[int]:
                 f"ALLOWED_USER_IDS contains a non-numeric entry: {chunk!r}"
             ) from exc
     return frozenset(ids)
+
+
+def _resolve_database() -> Path | str:
+    """DATABASE_URL wins when set; otherwise the local SQLite file.
+
+    Keeping both means the same code runs locally with no server and on a host
+    with no disk, and that the SQLite file stays a usable fallback after the
+    migration rather than becoming dead weight.
+    """
+    url = (os.getenv("DATABASE_URL") or "").strip()
+    if url:
+        return url
+    return Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db")
 
 
 def load_settings(env_file: str | None = None) -> Settings:
@@ -97,7 +114,8 @@ def load_settings(env_file: str | None = None) -> Settings:
         webhook_url=webhook_url,
         webhook_port=int(os.getenv("WEBHOOK_PORT") or 8443),
         webhook_secret=(os.getenv("WEBHOOK_SECRET") or "").strip() or None,
-        db_path=Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db"),
+        db_path=_resolve_database(),
+        sqlite_path=Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db"),
         allowed_user_ids=_parse_user_ids(os.getenv("ALLOWED_USER_IDS") or ""),
         # Absent key is not fatal: link capture still works, captions simply go
         # unparsed until one is configured.
