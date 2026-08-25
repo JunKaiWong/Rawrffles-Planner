@@ -29,8 +29,13 @@ services:
       # Must match the service's public URL; the webhook path is appended.
       - key: WEBHOOK_URL
         sync: false
+      # NOT generateValue: Render generates base64, whose alphabet includes
+      # "+", "/" and "=", and Telegram rejects setWebhook for a secret token
+      # containing anything outside A-Z a-z 0-9 _ - . Supply a URL-safe value
+      # instead, which startup validation also checks:
+      #   python -c "import secrets; print(secrets.token_urlsafe(32))"
       - key: WEBHOOK_SECRET
-        generateValue: true
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       # Change this one if adding a member converts the group to a supergroup.

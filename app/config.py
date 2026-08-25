@@ -5,6 +5,7 @@ Override the file with ENV_FILE=... for tests or alternate deployments.
 """
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,6 +71,31 @@ def _parse_user_ids(raw: str) -> frozenset[int]:
     return frozenset(ids)
 
 
+def _validate_webhook_secret(secret: str) -> str:
+    """Check the secret against Telegram's accepted alphabet.
+
+    Telegram allows only A-Z, a-z, 0-9, underscore and hyphen, 1-256
+    characters, and rejects setWebhook outright otherwise. Render's generated
+    values are base64 and can contain +, / or =, so this fails at startup with
+    an actionable message rather than at the first setWebhook call.
+    """
+    if len(secret) > 256:
+        raise RuntimeError(
+            f"WEBHOOK_SECRET is {len(secret)} characters; Telegram allows at most 256."
+        )
+    invalid = sorted(set(re.sub(r"[A-Za-z0-9_-]", "", secret)))
+    if invalid:
+        raise RuntimeError(
+            "WEBHOOK_SECRET contains characters Telegram rejects: "
+            f"{' '.join(repr(c) for c in invalid)}.\n"
+            "Only A-Z, a-z, 0-9, underscore and hyphen are allowed.\n"
+            "Generate a valid one with:\n"
+            "  python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
+            "then set it as WEBHOOK_SECRET and redeploy."
+        )
+    return secret
+
+
 def _resolve_database() -> Path | str:
     """DATABASE_URL wins when set; otherwise the local SQLite file.
 
@@ -107,13 +133,30 @@ def load_settings(env_file: str | None = None) -> Settings:
     if transport == WEBHOOK and not webhook_url:
         raise RuntimeError("WEBHOOK_URL is required when TELEGRAM_TRANSPORT=webhook")
 
+    webhook_secret = (os.getenv("WEBHOOK_SECRET") or "").strip() or None
+    if webhook_secret:
+        # Validated whenever set, not only in webhook mode, so a bad value is
+        # caught before the deploy that would first use it.
+        webhook_secret = _validate_webhook_secret(webhook_secret)
+    elif transport == WEBHOOK:
+        # The webhook endpoint is public and cannot receive initData, so this
+        # token is the only thing proving an update came from Telegram. Without
+        # it, anyone who learns the URL could forge updates that appear to come
+        # from the allowlisted chat.
+        raise RuntimeError(
+            "WEBHOOK_SECRET is required when TELEGRAM_TRANSPORT=webhook: it is "
+            "what proves an incoming update really came from Telegram.\n"
+            "Generate one with:\n"
+            '  python -c "import secrets; print(secrets.token_urlsafe(32))"'
+        )
+
     return Settings(
         bot_token=_require("TELEGRAM_BOT_TOKEN", env_file),
         chat_id=chat_id,
         transport=transport,
         webhook_url=webhook_url,
         webhook_port=int(os.getenv("WEBHOOK_PORT") or 8443),
-        webhook_secret=(os.getenv("WEBHOOK_SECRET") or "").strip() or None,
+        webhook_secret=webhook_secret,
         db_path=_resolve_database(),
         sqlite_path=Path(os.getenv("DATABASE_PATH") or PROJECT_ROOT / "planner.db"),
         allowed_user_ids=_parse_user_ids(os.getenv("ALLOWED_USER_IDS") or ""),
