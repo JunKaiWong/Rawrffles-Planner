@@ -70,19 +70,8 @@ Development uses a virtualenv at `venv/` (gitignored).
   not use it. Anthropic API is an alternate if trial credits are available.
   Keep the LLM call behind a single `plan_date()` function so the provider can
   be swapped without touching the rest of the code.
-  **Free tier is ~5 requests/minute AND ~20 requests/day, per model.** The
-  daily cap is the binding constraint and is easy to exhaust while testing;
-  the quota is scoped per model, so switching `GEMINI_MODEL` yields a fresh
-  daily allowance. Pace backfills, retry on rate limit, and never split work
-  across two calls that could be done in one — this is why categorisation
-  shares the caption-parsing call rather than adding a second pass.
-  **Confirm model strings against the API, never from memory.** Model names go
-  stale fast: `gemini-2.5-flash` now returns 404 for newly issued keys. Check
-  with `client.models.list()` *and* a real `generate_content` call — being
-  listed does not mean it is callable. Current default is `gemini-3.6-flash`
-  (set via `GEMINI_MODEL`); `gemini-3.7-flash` exists and works but returns 503
-  under load often enough to be a poor default. Retry 429 *and* 503; a 404 is
-  permanent and must not be retried.
+  **Free tier is ~5 requests/minute** — pace backfills, retry on rate limit, and
+  never split work across two calls that could be done in one.
 - **Local events**: Ticketmaster Discovery API and/or Eventbrite API free tiers.
 - **Database**: built-in `sqlite3` (two users, low volume). Swap to Postgres
   only if the hosting provider makes that easier.
@@ -159,6 +148,29 @@ When the saved links don't cover a gap (e.g. no food saved near the anchor
 point), query OneMap's thematic layers for real nearby amenities and pass those
 results into the prompt as the candidate set. If no real candidate exists, the
 plan should say so rather than inventing one.
+
+### Same-venue detection across posts (deferred — do not build yet)
+
+Dedup currently works on canonical URL only, so two influencers posting about
+the same restaurant — or the same venue on TikTok and Instagram — produce two
+unrelated rows.
+
+When this is addressed: **group, don't merge.** Two posts about one place is
+useful signal (independent recommendations, and each post may carry different
+details). Use a nullable `venue_group_id` so grouped links stay separate rows
+and the Mini App can stack them ("Cafe De Paris — 2 saved posts").
+
+Never auto-merge. Chain outlets ("Cafe De Paris, Orchard" vs "…, Tampines") are
+different outings, and a silent merge destroys information without telling
+anyone. Flag suspected matches for confirmation instead.
+
+Detection should use fuzzy matching on extracted `title` + `location`, and
+becomes far more reliable once geocoding provides coordinates — so build
+geocoding first.
+
+**Deferred deliberately**: a similarity threshold cannot be tuned against a
+handful of links. Collect ~50 real links first and measure how often this
+actually occurs before building anything.
 
 ## Database (starting schema)
 
