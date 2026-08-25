@@ -135,6 +135,7 @@ const CATEGORY_LABELS = {
 
 const state = {
   links: [],
+  dates: [],
   tab: "todo",
   category: "all",
   subcategory: "all",
@@ -160,6 +161,7 @@ const els = {
   rating: document.getElementById("rating"),
   note: document.getElementById("note"),
   saveBtn: document.getElementById("save-btn"),
+  dateBanner: document.getElementById("date-banner"),
   devBanner: document.getElementById("dev-banner"),
   devBannerText: document.getElementById("dev-banner__text"),
   devTokenBtn: document.getElementById("dev-token-btn"),
@@ -203,6 +205,7 @@ async function api(path, options = {}) {
 }
 
 const fetchLinks = () => api("/links");
+const fetchDates = () => api("/dates");
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
 
@@ -372,7 +375,39 @@ function renderFilters(tabLinks) {
   }
 }
 
+function ordinal(n) {
+  if (n % 100 >= 10 && n % 100 <= 20) return `${n}th`;
+  return `${n}${{ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th"}`;
+}
+
+function describeWhen(days) {
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 7) return `in ${days} days`;
+  if (days < 14) return "next week";
+  return `in ${days} days`;
+}
+
+function renderDateBanner() {
+  // Only the nearest date. A list of every anniversary would push the links -
+  // the reason the app exists - below the fold.
+  const next = state.dates[0];
+  if (!next) {
+    els.dateBanner.hidden = true;
+    els.dateBanner.innerHTML = "";
+    return;
+  }
+  const years = next.years ? ` · ${ordinal(next.years)}` : "";
+  els.dateBanner.hidden = false;
+  els.dateBanner.className = `date-banner${next.days_until === 0 ? " date-banner--today" : ""}`;
+  els.dateBanner.innerHTML = `
+    <span class="date-banner__label">${escapeHtml(next.label)}${escapeHtml(years)}</span>
+    <span class="date-banner__when">${escapeHtml(describeWhen(next.days_until))}</span>
+  `;
+}
+
 function render() {
+  renderDateBanner();
   const done = state.links.filter((link) => link.done);
   const outstanding = state.links.filter((link) => !link.done);
   // Day trips are split out of "To visit" so the main list stays the set the
@@ -614,7 +649,16 @@ function setupDevBanner() {
 async function load() {
   setStatus("Loading…", "info");
   try {
-    state.links = await fetchLinks();
+    // Both in parallel; a failure to load dates must not hide the links.
+    const [links, dates] = await Promise.all([
+      fetchLinks(),
+      fetchDates().catch((err) => {
+        console.warn("[planner] could not load dates", err);
+        return [];
+      }),
+    ]);
+    state.links = links;
+    state.dates = dates;
     render();
   } catch (err) {
     setStatus(err.message, "error");

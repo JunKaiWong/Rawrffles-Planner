@@ -32,6 +32,11 @@ from app.auth import allowed_chat_filter
 from app.config import POLLING, PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.database import count_links, init_db
 from app.handlers.link_handler import LINK_PATTERN, handle_links
+from app.handlers.reminder_handler import (
+    add_date_command,
+    delete_date_command,
+    list_dates_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +46,8 @@ LOG_FILE = PROJECT_ROOT / "logs" / "bot.log"
 # Weekly yt-dlp refresh: Monday (0 = Monday in PTB's run_daily) at 04:15.
 EXTRACTOR_REFRESH_DAY = 0
 EXTRACTOR_REFRESH_TIME = dt_time(hour=4, minute=15)
+# Local-clock morning. Deployed, GitHub Actions owns this instead.
+REMINDER_TIME = dt_time(hour=9, minute=0)
 
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -154,6 +161,17 @@ def build_application(settings: Settings) -> Application:
             handle_links,
         )
     )
+    # Date commands are allowlisted like everything else that touches data.
+    application.add_handler(
+        CommandHandler("adddate", add_date_command, filters=only_our_group)
+    )
+    application.add_handler(
+        CommandHandler("dates", list_dates_command, filters=only_our_group)
+    )
+    application.add_handler(
+        CommandHandler("deldate", delete_date_command, filters=only_our_group)
+    )
+
     # Unrestricted on purpose - see chat_id()'s docstring. It returns nothing
     # but the caller's own chat id.
     application.add_handler(CommandHandler("chatid", chat_id))
@@ -214,6 +232,19 @@ def _schedule_jobs(application: Application) -> None:
         EXTRACTOR_REFRESH_DAY,
         EXTRACTOR_REFRESH_TIME,
     )
+
+    async def _reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+        from datetime import date as _date
+
+        from app.jobs.daily_reminders import send_reminders
+
+        try:
+            await send_reminders(context.bot_data["settings"], _date.today())
+        except Exception:
+            logger.exception("scheduled reminder run failed")
+
+    job_queue.run_daily(_reminders, time=REMINDER_TIME, name="daily-reminders")
+    logger.info("scheduled daily reminders at %s", REMINDER_TIME)
 
 
 def run(settings: Settings | None = None) -> None:

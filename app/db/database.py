@@ -487,6 +487,41 @@ def update_link(
     return get_link(db_path, link_id)
 
 
+def add_date(
+    db_path: str | Path, label: str, when: str, recurring: bool = False
+) -> int:
+    """Store an anniversary or one-off date. `when` is ISO YYYY-MM-DD."""
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO dates (label, date, recurring) VALUES (?, ?, ?) RETURNING id",
+            (label, when, bool(recurring)),
+        )
+        date_id = int(dict(cursor.fetchone())["id"])
+    logger.info(
+        "stored date id=%s label=%r date=%s recurring=%s", date_id, label, when, recurring
+    )
+    return date_id
+
+
+def list_dates(db_path: str | Path) -> list:
+    """Every stored date. Whether one is upcoming is decided in code, since a
+    recurring date's next occurrence cannot be expressed as a stored value."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, label, date, recurring FROM dates ORDER BY date"
+        ).fetchall()
+    logger.debug("listed %d date(s)", len(rows))
+    return rows
+
+
+def delete_date(db_path: str | Path, date_id: int) -> bool:
+    with connect(db_path) as conn:
+        cursor = conn.execute("DELETE FROM dates WHERE id = ?", (date_id,))
+        removed = cursor.rowcount > 0
+    logger.info("delete date id=%s -> %s", date_id, "removed" if removed else "not found")
+    return removed
+
+
 def count_links(db_path: str | Path) -> int:
     with connect(db_path) as conn:
         # Named rather than positional: psycopg returns mappings, where [0]

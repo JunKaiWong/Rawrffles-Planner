@@ -13,21 +13,25 @@ name: Scheduled jobs
 
 on:
   schedule:
+    # Daily reminders: 01:00 UTC is 09:00 in Singapore, so an anniversary is
+    # mentioned over breakfast rather than in the middle of the night. This one
+    # posts to the group, so its timing is the one that is actually felt.
+    - cron: "0 1 * * *"
     # Weekly: refresh yt-dlp and retry links it previously could not read.
     # Mondays 04:15 UTC. GitHub queues cron on shared runners, so treat the
     # time as approximate.
     - cron: "15 4 * * 1"
     # Daily: parse any captions still waiting, a few at a time to stay inside
-    # the Gemini free tier's daily allowance.
+    # the Gemini free tier's allowance.
     - cron: "30 5 * * *"
   workflow_dispatch:
     inputs:
       job:
         description: Which job to run
         required: true
-        default: captions
+        default: reminders
         type: choice
-        options: [captions, extractor]
+        options: [reminders, captions, extractor]
 
 concurrency:
   # Two runs writing the same rows would double-spend Gemini quota.
@@ -57,6 +61,10 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Post reminders for upcoming dates
+        if: github.event.schedule == '0 1 * * *' || inputs.job == 'reminders'
+        run: python -m app.jobs.daily_reminders
 
       - name: Refresh yt-dlp and retry unreadable links
         if: github.event.schedule == '15 4 * * 1' || inputs.job == 'extractor'

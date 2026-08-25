@@ -123,6 +123,48 @@ body {
   cursor: pointer;
 }
 
+/* --- Upcoming date banner --- */
+
+.date-banner {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 16px 0;
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tg-button);
+  border-radius: 10px;
+  background: var(--tg-secondary-bg);
+}
+
+.date-banner[hidden] {
+  display: none;
+}
+
+/* The day itself earns a stronger treatment than a countdown. */
+.date-banner--today {
+  border-left-color: #e8574a;
+  background: rgba(232, 87, 74, 0.12);
+}
+
+.date-banner__label {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.date-banner__when {
+  flex-shrink: 0;
+  color: var(--tg-hint);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.date-banner--today .date-banner__when {
+  color: #e8574a;
+}
+
 /* --- Header + tabs --- */
 
 .header {

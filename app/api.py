@@ -33,7 +33,15 @@ from pydantic import BaseModel, Field
 from app.auth import InitDataError, TelegramUser, authorise_user
 from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.engine import describe
-from app.db.database import get_link, init_db, is_day_trip, list_links, update_link
+from app.db.database import (
+    get_link,
+    init_db,
+    is_day_trip,
+    list_dates,
+    list_links,
+    update_link,
+)
+from app.services.reminders import upcoming
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +120,20 @@ class LinkOut(BaseModel):
     event_start: str | None = None
     event_end: str | None = None
     is_evergreen: bool
+
+
+class DateOut(BaseModel):
+    """An anniversary or one-off date, resolved against today."""
+
+    id: int
+    label: str
+    # The stored date: for a recurring entry this is the original event.
+    date: str
+    recurring: bool
+    # When it next happens, which is what the Mini App counts down to.
+    occurs_on: str
+    days_until: int
+    years: int | None = None
 
 
 class LinkUpdate(BaseModel):
@@ -302,6 +324,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("serving Mini App from %s at /miniapp", MINIAPP_DIR)
     else:  # pragma: no cover - only if the directory is missing
         logger.warning("Mini App directory not found at %s", MINIAPP_DIR)
+
+    @app.get(
+        "/api/dates",
+        response_model=list[DateOut],
+        tags=["dates"],
+        summary="Upcoming anniversaries and important dates",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def read_dates(
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> list[DateOut]:
+        """Soonest first, with past one-offs already dropped.
+
+        The next occurrence is computed here rather than stored, because a
+        recurring date has no single future value to keep in a column.
+        """
+        rows = list_dates(settings.db_path)
+        items = upcoming(rows)
+        logger.debug("returning %d upcoming date(s) to user %s", len(items), user.id)
+        return [
+            DateOut(
+                id=item.id,
+                label=item.label,
+                date=item.stored_date,
+                recurring=item.recurring,
+                occurs_on=item.occurs_on.isoformat(),
+                days_until=item.days_until,
+                years=item.years,
+            )
+            for item in items
+        ]
 
     @app.get(
         "/api/links",
