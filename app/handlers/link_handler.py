@@ -25,9 +25,11 @@ from telegram.ext import ContextTypes
 from app.db.database import (
     find_link_by_canonical_url,
     find_link_by_url,
+    get_link,
     insert_link,
     is_day_trip,
     save_caption_parse,
+    set_photo_file_id,
 )
 from app.services.caption_parser import parse_caption_async
 from app.services.extractor import extract_async
@@ -94,7 +96,35 @@ def _describe(url: str, platform: str) -> str:
     return f"{_platform_label(platform)} - {url}"
 
 
-async def _parse_and_store(context, db_path, link_id: int, platform: str, metadata):
+async def _fetch_photo(context, message) -> tuple[str | None, bytes | None]:
+    """Return (file_id, image bytes) for a photo message, or (None, None).
+
+    Telegram sends several sizes; the last is the largest. Only the file_id is
+    stored - Telegram re-serves the image on demand, so the bytes are used for
+    this one parse and then discarded rather than costing us storage.
+    """
+    photos = getattr(message, "photo", None)
+    if not photos:
+        return None, None
+
+    largest = photos[-1]
+    file_id = largest.file_id
+    try:
+        telegram_file = await context.bot.get_file(file_id)
+        image = bytes(await telegram_file.download_as_bytearray())
+    except Exception:
+        # The file_id is still worth keeping even if the download failed: the
+        # Mini App can render it later.
+        logger.exception("could not download photo file_id=%s", file_id)
+        return file_id, None
+
+    logger.info("downloaded photo file_id=%s (%d bytes)", file_id, len(image))
+    return file_id, image
+
+
+async def _parse_and_store(
+    context, db_path, link_id: int, platform: str, metadata, image_bytes=None
+):
     """Parse the caption once and cache it. Returns the parse, or None.
 
     A parse failure is logged and swallowed: the link is already stored, and
@@ -112,6 +142,7 @@ async def _parse_and_store(context, db_path, link_id: int, platform: str, metada
         model_name=settings.gemini_model,
         title=metadata.title,
         platform=platform,
+        image_bytes=image_bytes,
     )
     if not parsed.ok:
         # parsed_at stays NULL so a later backfill can retry this one.
@@ -134,10 +165,75 @@ async def _parse_and_store(context, db_path, link_id: int, platform: str, metada
     return parsed
 
 
-def _summarise_saved(link_id: int, platform: str, url: str, metadata, parsed=None) -> str:
+async def _enrich_existing(context, db_path, existing_id: int, platform: str, photo_file_id, image_bytes):
+    """Use a screenshot to fill in a link that was already saved.
+
+    The normal sequence for a photo/slideshow post is two messages: the URL
+    first, which yt-dlp cannot read and so stores almost nothing, then the
+    screenshot. Treating the second as a bare duplicate would throw away the
+    only content this post will ever have.
+
+    Only links without a screenshot are enriched, so re-sending an image does
+    not re-spend quota.
+    """
+    row = get_link(db_path, existing_id)
+    if row is None:
+        return None
+    if row["photo_file_id"]:
+        logger.info("link id=%s already has a screenshot; not re-parsing", existing_id)
+        return None
+
+    if photo_file_id:
+        set_photo_file_id(db_path, existing_id, photo_file_id)
+    if image_bytes is None:
+        return None
+
+    logger.info("enriching existing link id=%s from screenshot", existing_id)
+
+    class _Meta:  # matches the shape _parse_and_store expects
+        caption = row["caption"]
+        title = row["title"]
+
+    return await _parse_and_store(
+        context, db_path, existing_id, platform, _Meta(), image_bytes
+    )
+
+
+def _summarise_enriched(link_id: int, platform: str, parsed) -> str:
+    """Confirmation for a link filled in from a screenshot."""
+    headline = parsed.title or "(no title found in image)"
+    lines = [f"  #{link_id} {_platform_label(platform)} - {headline}"]
+    lines.extend(_summarise_parsed(parsed))
+    return "\n".join(lines)
+
+
+def _summarise_parsed(parsed) -> list[str]:
+    """The extracted fields, shown so the result is verifiable in chat."""
+    lines = []
+    if parsed.location:
+        suffix = f" ({parsed.region})" if parsed.region and is_day_trip(parsed.region) else ""
+        lines.append(f"     location: {parsed.location}{suffix}")
+    if parsed.category:
+        label = f"{parsed.category}/{parsed.subcategory}"
+        if parsed.tags:
+            label += f" · {', '.join(parsed.tags)}"
+        lines.append(f"     {label}")
+    if parsed.event_end:
+        window = parsed.event_start or "?"
+        lines.append(f"     runs: {window} to {parsed.event_end}")
+    return lines
+
+
+def _summarise_saved(
+    link_id: int, platform: str, url: str, metadata, parsed=None, from_image: bool = False
+) -> str:
     """One confirmation entry: what was saved, and what we learned about it."""
     headline = (parsed.title if parsed and parsed.title else None) or metadata.title or url
     lines = [f"  #{link_id} {_platform_label(platform)} - {headline}"]
+    if from_image:
+        # Say where the information came from, since for a photo post the
+        # screenshot is the only source there is.
+        lines.append("     read from your screenshot")
 
     location = (parsed.location if parsed else None) or metadata.location
     if location:
@@ -197,6 +293,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     saved: list[str] = []
+    updated: list[str] = []
     duplicates: list[str] = []
     failed: list[str] = []
 
@@ -206,6 +303,17 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await message.chat.send_action(ChatAction.TYPING)
     except Exception:  # noqa: BLE001 - cosmetic only
         logger.debug("could not send typing action", exc_info=True)
+
+    # A screenshot sent with the URL in its caption is how photo/slideshow
+    # posts get their content to us, since yt-dlp cannot read them.
+    photo_file_id, image_bytes = await _fetch_photo(context, message)
+    if photo_file_id:
+        logger.info(
+            "message_id=%s carries a photo (file_id=%s, downloaded=%s)",
+            message.message_id,
+            photo_file_id,
+            image_bytes is not None,
+        )
 
     for url, platform in links:
         try:
@@ -218,7 +326,13 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     existing["id"],
                     existing["added_at"],
                 )
-                duplicates.append(f"  #{existing['id']} {_describe(url, platform)}")
+                enriched = await _enrich_existing(
+                    context, db_path, existing["id"], platform, photo_file_id, image_bytes
+                )
+                if enriched:
+                    updated.append(_summarise_enriched(existing["id"], platform, enriched))
+                else:
+                    duplicates.append(f"  #{existing['id']} {_describe(url, platform)}")
                 continue
 
             metadata = await extract_async(url)
@@ -236,10 +350,18 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         existing["id"],
                         existing["url"],
                     )
-                    duplicates.append(
-                        f"  #{existing['id']} {_platform_label(platform)} - "
-                        f"same post as {existing['url']}"
+                    # A screenshot for a link we already hold is the point of
+                    # the photo workflow, not a duplicate to discard.
+                    enriched = await _enrich_existing(
+                        context, db_path, existing["id"], platform, photo_file_id, image_bytes
                     )
+                    if enriched:
+                        updated.append(_summarise_enriched(existing["id"], platform, enriched))
+                    else:
+                        duplicates.append(
+                            f"  #{existing['id']} {_platform_label(platform)} - "
+                            f"same post as {existing['url']}"
+                        )
                     continue
 
             link_id = insert_link(
@@ -251,15 +373,19 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 title=metadata.title,
                 caption=metadata.caption,
                 location=metadata.location,
+                photo_file_id=photo_file_id,
             )
             # Caption parse runs once, here at intake, and the result is cached
-            # on the row. Planning never re-parses.
+            # on the row. Planning never re-parses. A screenshot rides along in
+            # that same call rather than costing a second one.
             parsed = None
-            if metadata.caption or metadata.title:
+            if metadata.caption or metadata.title or image_bytes:
                 parsed = await _parse_and_store(
-                    context, db_path, link_id, platform, metadata
+                    context, db_path, link_id, platform, metadata, image_bytes
                 )
-            saved.append(_summarise_saved(link_id, platform, url, metadata, parsed))
+            saved.append(
+                _summarise_saved(link_id, platform, url, metadata, parsed, bool(image_bytes))
+            )
         except Exception:
             # Never let one bad link kill the rest of the message.
             logger.exception("failed to store url=%s platform=%s", url, platform)
@@ -270,6 +396,9 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if saved:
         lines.append(f"Saved {len(saved)} link{'s' if len(saved) != 1 else ''}:")
         lines.extend(saved)
+    if updated:
+        lines.append(f"Updated from your screenshot ({len(updated)}):")
+        lines.extend(updated)
     if duplicates:
         lines.append(f"Already saved ({len(duplicates)}):")
         lines.extend(duplicates)
@@ -279,9 +408,10 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     reply = "\n".join(lines)
     logger.info(
-        "intake result for message_id=%s: saved=%d duplicate=%d failed=%d",
+        "intake result for message_id=%s: saved=%d updated=%d duplicate=%d failed=%d",
         message.message_id,
         len(saved),
+        len(updated),
         len(duplicates),
         len(failed),
     )

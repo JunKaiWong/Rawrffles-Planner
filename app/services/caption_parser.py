@@ -112,12 +112,23 @@ Rules:
   "cheap eats", "queue long"). Use an empty array if nothing is worth tagging;
   do not restate the category or the venue name as a tag.
 
-Platform: {platform}
+{image_note}Platform: {platform}
 Post title: {title}
 Caption:
 \"\"\"
 {caption}
 \"\"\"
+"""
+
+# Added to the prompt when a screenshot accompanies the post. yt-dlp cannot read
+# TikTok photo/slideshow posts, so the users screenshot the slide that matters
+# and send it with the URL in the caption - which means the image, not the
+# caption, carries the actual content.
+IMAGE_NOTE = """\
+An image is attached: a screenshot of the post, supplied because this post type
+cannot be read automatically. Treat the image as the primary source and read any
+text in it. The caption below may contain nothing but the post URL.
+
 """
 
 
@@ -250,23 +261,31 @@ def parse_caption(
     title: str | None = None,
     platform: str | None = None,
     today: date | None = None,
+    image_bytes: bytes | None = None,
+    image_mime: str = "image/jpeg",
 ) -> ParsedCaption:
-    """Blocking parse of one caption. Never raises."""
+    """Blocking parse of one post. Never raises.
+
+    When `image_bytes` is supplied the image is sent alongside the same prompt,
+    in the *same* call - vision and text are one request, never two, because
+    the free tier's daily quota is the binding constraint. The schema and
+    taxonomy are identical either way, so both paths produce one shape.
+    """
     source = (caption or "").strip() or (title or "").strip()
-    if not source:
-        # Photo posts often have no caption at all. Nothing to parse, and no
-        # reason to spend a call finding that out again later.
-        logger.info("no caption or title to parse; skipping model call")
+    if not source and not image_bytes:
+        # Nothing to work with, and no reason to spend a call finding that out.
+        logger.info("no caption, title or image to parse; skipping model call")
         return ParsedCaption(ok=True, error=None)
 
     prompt = PROMPT_TEMPLATE.format(
         today=(today or date.today()).isoformat(),
         platform=platform or "unknown",
         title=title or "(none)",
-        caption=source[:4000],
+        caption=source[:4000] or "(none)",
         categories=" | ".join(CATEGORIES),
         taxonomy=_TAXONOMY_BLOCK,
         max_tags=MAX_TAGS,
+        image_note=IMAGE_NOTE if image_bytes else "",
     )
 
     try:
@@ -284,11 +303,20 @@ def parse_caption(
         logger.exception("could not create Gemini client")
         return ParsedCaption(ok=False, error=f"{type(exc).__name__}: {exc}")
 
+    # One request carries both the screenshot and the prompt.
+    contents = (
+        [genai_types.Part.from_bytes(data=image_bytes, mime_type=image_mime), prompt]
+        if image_bytes
+        else prompt
+    )
+    if image_bytes:
+        logger.info("parsing with attached image (%d bytes, %s)", len(image_bytes), image_mime)
+
     raw = None
     for attempt in range(TRANSIENT_RETRIES + 1):
         try:
             response = client.models.generate_content(
-                model=model_name, contents=prompt, config=config
+                model=model_name, contents=contents, config=config
             )
             raw = (response.text or "").strip()
             break
@@ -366,12 +394,22 @@ async def parse_caption_async(
     title: str | None = None,
     platform: str | None = None,
     today: date | None = None,
+    image_bytes: bytes | None = None,
+    image_mime: str = "image/jpeg",
 ) -> ParsedCaption:
     """Run `parse_caption` off the event loop so the bot stays responsive."""
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
-                parse_caption, caption, api_key, model_name, title, platform, today
+                parse_caption,
+                caption,
+                api_key,
+                model_name,
+                title,
+                platform,
+                today,
+                image_bytes,
+                image_mime,
             ),
             timeout=PARSE_TIMEOUT_SECONDS,
         )

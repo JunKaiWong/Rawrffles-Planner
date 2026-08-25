@@ -147,6 +147,7 @@ def insert_link(
     title: str | None = None,
     caption: str | None = None,
     location: str | None = None,
+    photo_file_id: str | None = None,
     added_at: str | None = None,
 ) -> int:
     """Insert a link and return its new id.
@@ -158,8 +159,19 @@ def insert_link(
     with connect(db_path) as conn:
         cursor = conn.execute(
             "INSERT INTO links (url, canonical_url, platform, title, caption, "
-            "location, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (url, canonical_url, platform, title, caption, location, added_by, added_at),
+            "location, photo_file_id, added_by, added_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                url,
+                canonical_url,
+                platform,
+                title,
+                caption,
+                location,
+                photo_file_id,
+                added_by,
+                added_at,
+            ),
         )
         link_id = int(cursor.lastrowid)
     logger.info(
@@ -277,6 +289,19 @@ def save_caption_parse(
         subcategory,
         tags_value,
     )
+
+
+def set_photo_file_id(db_path: str | Path, link_id: int, photo_file_id: str) -> None:
+    """Attach a screenshot to an existing link.
+
+    The usual sequence is: the URL is pasted (photo posts yield no metadata),
+    and the screenshot arrives afterwards to supply what yt-dlp could not read.
+    """
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE links SET photo_file_id = ? WHERE id = ?", (photo_file_id, link_id)
+        )
+    logger.info("attached photo to link id=%s", link_id)
 
 
 def links_needing_caption_parse(db_path: str | Path) -> list[sqlite3.Row]:
