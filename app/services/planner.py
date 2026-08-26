@@ -65,16 +65,27 @@ class Candidate:
     tier: str
     event_end: str | None
     rating: int | None
+    # "saved" for a link the couple chose themselves, "discovered" for a real
+    # venue found nearby to fill a gap. Kept distinct all the way to the output:
+    # one has been vetted by them, the other has not.
+    source: str = "saved"
+    # Stable handle used in the prompt. Saved links use their row id;
+    # discovered venues use "d1", "d2", so the two can never be confused.
+    key: str = ""
+
+    def handle(self) -> str:
+        return self.key or str(self.id)
 
 
 @dataclass
 class Stop:
-    link_id: int
+    link_id: int | None
     title: str
-    url: str
+    url: str | None
     location: str | None
     when: str | None = None
     why: str | None = None
+    source: str = "saved"
 
 
 @dataclass
@@ -83,7 +94,7 @@ class Plan:
     stops: list[Stop] = field(default_factory=list)
     summary: str | None = None
     error: str | None = None
-    dropped: list[int] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)
     cluster_size: int = 0
     # Links the caller asked for that could not be planned around, with why.
     # Silently ignoring a chosen link would look like the app lost it.
@@ -104,12 +115,18 @@ class Plan:
             lines += [self.summary, ""]
         for index, stop in enumerate(self.stops, 1):
             when = f"{stop.when} - " if stop.when else ""
-            lines.append(f"{index}. {when}{stop.title}")
+            # Say plainly which stops they picked and which the app found, so a
+            # suggestion is never mistaken for something already vetted.
+            marker = "" if stop.source == "saved" else "  [suggested]"
+            lines.append(f"{index}. {when}{stop.title}{marker}")
             if stop.location:
                 lines.append(f"   {stop.location}")
             if stop.why:
                 lines.append(f"   {stop.why}")
-            lines.append(f"   {stop.url}")
+            if stop.url:
+                lines.append(f"   {stop.url}")
+            elif stop.source != "saved":
+                lines.append("   (not one of your saved links - found nearby)")
         return "\n".join(lines)
 
 
@@ -254,6 +271,9 @@ STRICT RULES:
 - Use ONLY the places listed below, referenced by their exact "id".
 - Do NOT introduce any other venue, restaurant, cafe, attraction or landmark,
   not even as a suggestion or an aside. If the day feels thin, use fewer stops.
+- Places marked SUGGESTED are real nearby venues the couple has not been to.
+  They may be used, but do not claim they have been there or that they are
+  favourites.
 - Do not invent addresses, opening hours, prices or menu items.
 - Items marked urgent end soon; build the day around them.
 
@@ -272,7 +292,8 @@ Order "stops" in visiting order. Include between 1 and {max_stops} stops.
 
 
 def _describe_place(candidate: Candidate) -> str:
-    bits = [f'  - id {candidate.id}: "{candidate.title}"']
+    origin = "SAVED by them" if candidate.source == "saved" else "SUGGESTED (found nearby, not yet visited)"
+    bits = [f'  - id {candidate.handle()}: "{candidate.title}"  [{origin}]']
     if candidate.category:
         kind = candidate.category
         if candidate.subcategory and candidate.subcategory != "other":
@@ -322,9 +343,27 @@ def _scrub_prose(text: str | None, allowed: str) -> str | None:
     haystack = allowed.lower()
     for match in _PROPER_NOUN.findall(text):
         words = [w for w in re.split(r"\s+", match) if w]
+        # A venue name needs at least two capitalised words. Without this, a
+        # sentence opening like "Explore the exhibits" reads as a proper noun -
+        # the capital is just the start of the sentence - and costs a perfectly
+        # good line.
+        if sum(1 for w in words if w[:1].isupper()) < 2:
+            continue
         if all(w.lower() in _GENERIC_CAPS for w in words):
             continue
-        if match.lower() in haystack:
+        # A match can swallow the words in front of a name - "Visit the Asian
+        # Civilisations Museum" - so the name is taken as the trailing run of
+        # capitalised words, which stops at the lowercase "the". Checking
+        # arbitrary suffixes instead would be too lax: "Food Centre" is a
+        # substring of an allowed name, which would wave through any invented
+        # "<somewhere> Food Centre".
+        trailing: list[str] = []
+        for word in reversed(words):
+            if not word[:1].isupper():
+                break
+            trailing.insert(0, word)
+        name = " ".join(trailing) if len(trailing) >= 2 else match
+        if match.lower() in haystack or name.lower() in haystack:
             continue
         logger.warning(
             "dropping ungrounded prose: %r mentions %r, which is not in the shortlist",
@@ -387,6 +426,94 @@ def _call_model(prompt: str, api_key: str, model_name: str) -> tuple[str | None,
     return None, "no response from model"
 
 
+GAP_SEARCH_RADIUS_METRES = 1200
+MAX_DISCOVERED = 4
+# A discovered venue this close to a chosen stop is almost certainly the same
+# place under another name, and suggesting it back would be noise.
+DUPLICATE_RADIUS_METRES = 120
+
+
+def _centroid(candidates: list[Candidate]) -> tuple[float, float]:
+    return (
+        sum(c.lat for c in candidates) / len(candidates),
+        sum(c.lng for c in candidates) / len(candidates),
+    )
+
+
+def find_gap_fillers(
+    shortlist: list[Candidate], settings, radius_metres: int = GAP_SEARCH_RADIUS_METRES
+) -> list[Candidate]:
+    """Real venues near the shortlist that fill a missing category.
+
+    A day of three cafes is not an outing, and a day with nowhere to eat is not
+    one either. Where the saved links do not cover food or an activity, OneMap
+    is asked for real places near the centroid - never the model, which would
+    happily invent something plausible and closed.
+    """
+    if not shortlist:
+        return []
+
+    email = getattr(settings, "onemap_email", None)
+    password = getattr(settings, "onemap_password", None)
+    if not email or not password:
+        logger.info("no OneMap credentials; skipping venue discovery")
+        return []
+
+    present = {c.category for c in shortlist if c.category}
+    gaps = [category for category in ("food", "activity") if category not in present]
+    if not gaps:
+        logger.info("shortlist already covers food and activity; no gaps to fill")
+        return []
+
+    lat, lng = _centroid(shortlist)
+    logger.info(
+        "filling gap(s) %s near centroid %.5f,%.5f (radius %dm)", gaps, lat, lng, radius_metres
+    )
+
+    from app.services.onemap import find_places
+
+    discovered: list[Candidate] = []
+    for category in gaps:
+        if len(discovered) >= MAX_DISCOVERED:
+            break
+        for place in find_places(
+            category, lat, lng, radius_metres, email, password, limit=MAX_DISCOVERED
+        ):
+            # Skip anything that is effectively a stop they already chose.
+            if any(
+                distance_metres((place.lat, place.lng), (c.lat, c.lng))
+                <= DUPLICATE_RADIUS_METRES
+                for c in shortlist
+            ):
+                continue
+            discovered.append(
+                Candidate(
+                    id=-1,
+                    title=place.name,
+                    url="",
+                    category=category,
+                    subcategory=place.theme,
+                    tags=None,
+                    location=place.address or place.description,
+                    lat=place.lat,
+                    lng=place.lng,
+                    tier=TIER_FLEXIBLE,
+                    event_end=None,
+                    rating=None,
+                    source="discovered",
+                    key=f"d{len(discovered) + 1}",
+                )
+            )
+            break  # one suggestion per gap is enough to round out a day
+
+    logger.info(
+        "discovered %d venue(s) to fill gaps: %s",
+        len(discovered),
+        [(c.key, c.title[:30]) for c in discovered],
+    )
+    return discovered
+
+
 def _spread(candidates: list[Candidate]) -> int:
     if len(candidates) < 2:
         return 0
@@ -425,6 +552,7 @@ def plan_date(
     today: date | None = None,
     radius_metres: int = CLUSTER_RADIUS_METRES,
     link_ids: list[int] | None = None,
+    settings=None,
 ) -> Plan:
     """The single seam for the planning LLM call. Never raises.
 
@@ -467,6 +595,31 @@ def plan_date(
             [(c.id, c.title[:24], c.tier) for c in shortlist],
         )
 
+    # Round the day out with real nearby venues where the saved links leave a
+    # gap. These are search results, never model inventions, and stay marked as
+    # unvetted suggestions all the way to the output.
+    if settings is not None:
+        try:
+            fillers = find_gap_fillers(shortlist, settings)
+            if fillers:
+                # A full shortlist with a gap in it is the case this feature
+                # exists for - four cafes in a row is not an outing. Make room
+                # by dropping the lowest-priority saved stop, which stays saved
+                # for another day, rather than declining to fill the gap.
+                while len(shortlist) + len(fillers) > MAX_STOPS and len(shortlist) > 1:
+                    demoted = shortlist[-1]
+                    logger.info(
+                        "making room for a gap-filler: holding back #%s (%s)",
+                        demoted.id,
+                        demoted.title[:40],
+                    )
+                    shortlist = shortlist[:-1]
+                shortlist = shortlist + fillers[: max(0, MAX_STOPS - len(shortlist))]
+        except Exception:
+            # Discovery is a bonus; a plan built only from saved links is still
+            # a plan.
+            logger.exception("venue discovery failed; continuing without it")
+
     if not api_key:
         return Plan(ok=False, error="GEMINI_API_KEY is not configured", excluded=excluded)
 
@@ -486,33 +639,31 @@ def plan_date(
 
     # Grounding enforcement: only ids we supplied may appear, and the names the
     # user sees are taken from our own records rather than from the response.
-    by_id = {c.id: c for c in shortlist}
+    by_id = {c.handle(): c for c in shortlist}
     # Everything the model is allowed to name, drawn from our own records.
     allowed_text = " | ".join(
         " ".join(filter(None, (c.title, c.location, c.tags))) for c in shortlist
     ).lower()
     stops: list[Stop] = []
-    dropped: list[int] = []
+    dropped: list[str] = []
     for entry in payload.get("stops") or []:
         if not isinstance(entry, dict):
             continue
-        try:
-            link_id = int(entry.get("id"))
-        except (TypeError, ValueError):
-            continue
-        candidate = by_id.get(link_id)
+        handle = str(entry.get("id") or "").strip()
+        candidate = by_id.get(handle)
         if candidate is None:
-            logger.warning("model referenced unknown link id %s; dropping", link_id)
-            dropped.append(link_id)
+            logger.warning("model referenced unknown place id %r; dropping", handle)
+            dropped.append(handle)
             continue
-        if any(s.link_id == link_id for s in stops):
+        if any(s.title == candidate.title for s in stops):
             continue
         stops.append(
             Stop(
-                link_id=candidate.id,
+                link_id=candidate.id if candidate.source == "saved" else None,
                 title=candidate.title,
-                url=candidate.url,
+                url=candidate.url or None,
                 location=candidate.location,
+                source=candidate.source,
                 when=(str(entry.get("when")).strip() or None) if entry.get("when") else None,
                 why=_scrub_prose(
                     str(entry.get("why")).strip() if entry.get("why") else None,

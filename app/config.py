@@ -41,6 +41,10 @@ class Settings:
     sqlite_path: Path = PROJECT_ROOT / "planner.db"
     gemini_api_key: str | None = None
     gemini_model: str = DEFAULT_GEMINI_MODEL
+    # OneMap search needs no auth, but thematic layers and routing do. Absent
+    # credentials simply disable venue discovery; nothing else depends on them.
+    onemap_email: str | None = None
+    onemap_password: str | None = None
 
 
 def _require(name: str, env_file: str) -> str:
@@ -188,4 +192,6 @@ def load_settings(env_file: str | None = None) -> Settings:
         # unparsed until one is configured.
         gemini_api_key=(os.getenv("GEMINI_API_KEY") or "").strip() or None,
         gemini_model=(os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip(),
+        onemap_email=(os.getenv("ONEMAP_EMAIL") or "").strip() or None,
+        onemap_password=(os.getenv("ONEMAP_PASSWORD") or "").strip() or None,
     )

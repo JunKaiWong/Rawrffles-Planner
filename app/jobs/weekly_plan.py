@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 async def run(settings, today: date, dry_run: bool = False, store: bool = True) -> bool:
     rows = list_links(settings.db_path)
     plan = plan_date(
-        rows, settings.gemini_api_key, settings.gemini_model, today=today
+        rows, settings.gemini_api_key, settings.gemini_model, today=today,
+        settings=settings,
     )
     if not plan.ok:
         # Nothing plannable is a normal state, not a failure: it usually means

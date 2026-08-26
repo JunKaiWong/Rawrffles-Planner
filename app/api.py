@@ -158,12 +158,16 @@ class PlanRequest(BaseModel):
 
 
 class PlanStopOut(BaseModel):
-    link_id: int
+    # Null for a discovered venue: it has no saved post behind it.
+    link_id: int | None = None
     title: str
-    url: str
+    url: str | None = None
     location: str | None = None
     when: str | None = None
     why: str | None = None
+    # "saved" (they chose it) or "discovered" (found nearby to fill a gap).
+    # Kept distinct so the app can show what has been vetted and what has not.
+    source: str = "saved"
 
 
 class PlanOut(BaseModel):
@@ -398,6 +402,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             None,
             CLUSTER_RADIUS_METRES,
             payload.link_ids,
+            settings,
         )
         if not plan.ok:
             raise HTTPException(
@@ -420,6 +425,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     location=s.location,
                     when=s.when,
                     why=s.why,
+                    source=s.source,
                 )
                 for s in plan.stops
             ],
