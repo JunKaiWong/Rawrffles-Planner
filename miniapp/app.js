@@ -142,6 +142,10 @@ const state = {
   tag: null,
   pending: null, // link awaiting the done sheet
   saving: false,
+  selecting: false,
+  selected: new Set(),
+  plan: null,
+  planning: false,
 };
 
 const els = {
@@ -162,6 +166,15 @@ const els = {
   note: document.getElementById("note"),
   saveBtn: document.getElementById("save-btn"),
   dateBanner: document.getElementById("date-banner"),
+  planAllBtn: document.getElementById("plan-all-btn"),
+  selectBtn: document.getElementById("select-btn"),
+  planFab: document.getElementById("plan-selected-fab"),
+  selectedCount: document.getElementById("selected-count"),
+  planSheet: document.getElementById("plan-sheet"),
+  planBody: document.getElementById("plan-body"),
+  planWeek: document.getElementById("plan-week"),
+  planTitle: document.getElementById("plan-title"),
+  postPlanBtn: document.getElementById("post-plan-btn"),
   devBanner: document.getElementById("dev-banner"),
   devBannerText: document.getElementById("dev-banner__text"),
   devTokenBtn: document.getElementById("dev-token-btn"),
@@ -193,19 +206,29 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
+    let payload = null;
     try {
       const body = await response.json();
-      if (body && body.detail) detail = typeof body.detail === "string" ? body.detail : detail;
+      payload = body && body.detail;
+      if (typeof payload === "string") detail = payload;
+      else if (payload && payload.error) detail = payload.error;
     } catch (err) {
       /* response had no JSON body; keep the generic message */
     }
-    throw new Error(detail);
+    const error = new Error(detail);
+    // The planner returns structured detail (which links were unusable, and
+    // why), so keep it rather than flattening to a sentence.
+    error.detail = payload;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
 
 const fetchLinks = () => api("/links");
 const fetchDates = () => api("/dates");
+const requestPlan = (linkIds) =>
+  api("/plan", { method: "POST", body: JSON.stringify({ link_ids: linkIds || null }) });
+const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
 
@@ -279,8 +302,18 @@ function cardHtml(link) {
   if (link.rating) doneDetails.push(`<span class="chip chip--rating">${link.rating}/10</span>`);
   if (link.note) doneDetails.push(`<span class="chip">${escapeHtml(link.note)}</span>`);
 
+  // In selection mode the whole card is the hit target, so the checkbox is an
+  // indicator rather than a small thing to aim at on a phone.
+  const selected = state.selected.has(link.id);
+  const checkbox = state.selecting
+    ? `<span class="card__check${selected ? " is-checked" : ""}" aria-hidden="true"></span>`
+    : "";
+
   return `
-    <article class="card${link.done ? " card--done" : ""}${expired ? " card--expired" : ""}" data-id="${link.id}">
+    <article class="card${link.done ? " card--done" : ""}${expired ? " card--expired" : ""}${
+      state.selecting ? " card--selectable" : ""
+    }${selected ? " card--selected" : ""}" data-id="${link.id}">
+      ${checkbox}
       <div class="card__body">
         <h2 class="card__title">${title}</h2>
         ${caption ? `<p class="card__caption">${caption}</p>` : ""}
@@ -508,7 +541,157 @@ els.tabs.forEach((tab) => {
   });
 });
 
+// --- Planning ---------------------------------------------------------------
+
+function setSelecting(on) {
+  state.selecting = on;
+  if (!on) state.selected.clear();
+  els.selectBtn.textContent = on ? "Cancel" : "Select";
+  els.selectBtn.classList.toggle("btn--primary", on);
+  els.selectBtn.classList.toggle("btn--ghost", !on);
+  updateFab();
+  render();
+}
+
+function updateFab() {
+  const count = state.selected.size;
+  els.selectedCount.textContent = count;
+  els.planFab.hidden = !state.selecting || count === 0;
+}
+
+function toggleSelected(id) {
+  const chosen = !state.selected.has(id);
+  if (chosen) state.selected.add(id);
+  else state.selected.delete(id);
+
+  // Update just this card. A full re-render on every tap rebuilds the whole
+  // list, which flickers and throws away the element the finger is still on.
+  const card = els.list.querySelector(`.card[data-id="${id}"]`);
+  if (card) {
+    card.classList.toggle("card--selected", chosen);
+    const check = card.querySelector(".card__check");
+    if (check) check.classList.toggle("is-checked", chosen);
+  }
+  updateFab();
+}
+
+function planHtml(plan) {
+  const parts = [];
+  if (plan.summary) parts.push(`<p class="plan__summary">${escapeHtml(plan.summary)}</p>`);
+
+  parts.push(
+    plan.stops
+      .map(
+        (stop, i) => `
+      <div class="plan__stop">
+        <span class="plan__index">${i + 1}</span>
+        <div class="plan__detail">
+          ${stop.when ? `<span class="plan__when">${escapeHtml(stop.when)}</span>` : ""}
+          <span class="plan__title">${escapeHtml(stop.title)}</span>
+          ${stop.location ? `<span class="plan__where">${escapeHtml(stop.location)}</span>` : ""}
+          ${stop.why ? `<span class="plan__why">${escapeHtml(stop.why)}</span>` : ""}
+          <a class="plan__link" href="${escapeHtml(stop.url)}" target="_blank" rel="noopener noreferrer">Open post</a>
+        </div>
+      </div>`
+      )
+      .join("")
+  );
+
+  // Spread and exclusions are stated plainly: a hand-picked selection can be
+  // spread across the island, and a link that was chosen but unusable would
+  // otherwise look like it had been lost.
+  if (plan.spread_metres >= 3000) {
+    parts.push(
+      `<p class="plan__note">These stops are about ${Math.round(plan.spread_metres / 1000)} km apart at their widest — expect real travel between them.</p>`
+    );
+  }
+  const excluded = Object.entries(plan.excluded || {});
+  if (excluded.length) {
+    parts.push(
+      `<p class="plan__note">Not included: ${excluded
+        .map(([id, reason]) => `#${escapeHtml(id)} (${escapeHtml(reason)})`)
+        .join(", ")}</p>`
+    );
+  }
+  return parts.join("");
+}
+
+function openPlanSheet(plan) {
+  state.plan = plan;
+  els.planWeek.textContent = `Saturday ${plan.week_of}`;
+  els.planBody.innerHTML = planHtml(plan);
+  els.postPlanBtn.disabled = false;
+  els.postPlanBtn.textContent = "Post to group";
+  els.planSheet.hidden = false;
+}
+
+function closePlanSheet() {
+  els.planSheet.hidden = true;
+  state.plan = null;
+}
+
+async function buildPlan(linkIds) {
+  if (state.planning) return;
+  state.planning = true;
+  const button = linkIds ? els.planFab : els.planAllBtn;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "Planning…";
+  setStatus("Building a plan… this takes a few seconds.", "info");
+  try {
+    const plan = await requestPlan(linkIds);
+    setStatus("");
+    openPlanSheet(plan);
+    if (state.selecting) setSelecting(false);
+    tg.HapticFeedback.notificationOccurred("success");
+  } catch (err) {
+    const excluded = err.detail && err.detail.excluded;
+    const extra = excluded
+      ? " " + Object.entries(excluded).map(([id, r]) => `#${id}: ${r}`).join(", ")
+      : "";
+    setStatus(`${err.message}${extra}`, "error");
+  } finally {
+    state.planning = false;
+    button.disabled = false;
+    button.textContent = original;
+    updateFab();
+  }
+}
+
+els.planAllBtn.addEventListener("click", () => buildPlan(null));
+els.selectBtn.addEventListener("click", () => setSelecting(!state.selecting));
+els.planFab.addEventListener("click", () => buildPlan([...state.selected]));
+els.planSheet.addEventListener("click", (event) => {
+  if (event.target.dataset.closePlan) closePlanSheet();
+});
+
+els.postPlanBtn.addEventListener("click", async () => {
+  if (!state.plan || !state.plan.id) return;
+  els.postPlanBtn.disabled = true;
+  els.postPlanBtn.textContent = "Posting…";
+  try {
+    await sendPlanToGroup(state.plan.id);
+    els.postPlanBtn.textContent = "Posted to group";
+    tg.HapticFeedback.notificationOccurred("success");
+  } catch (err) {
+    els.postPlanBtn.disabled = false;
+    els.postPlanBtn.textContent = "Post to group";
+    setStatus(err.message, "error");
+  }
+});
+
 els.list.addEventListener("click", async (event) => {
+  // Selection mode takes over the whole card, so an accidental tap cannot
+  // mark something done while picking places.
+  if (state.selecting) {
+    const card = event.target.closest(".card");
+    if (card) {
+      event.preventDefault();
+      toggleSelected(Number(card.dataset.id));
+    }
+    return;
+  }
+
   // Tapping a tag on a card filters by it.
   const tagButton = event.target.closest("button[data-tag]");
   if (tagButton) {

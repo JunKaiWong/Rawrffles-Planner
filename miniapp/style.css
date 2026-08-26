@@ -223,6 +223,162 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* --- Plan actions --- */
+
+.actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 12px;
+}
+
+/* Floating action button for tap-to-select planning. Sits above the list and
+   clear of the home indicator. */
+.fab {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  z-index: 15;
+  padding: 13px 24px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 650;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+}
+
+.fab[hidden] {
+  display: none;
+}
+
+.fab:disabled {
+  opacity: 0.6;
+}
+
+/* --- Selection --- */
+
+.card--selectable {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.card--selected {
+  border-color: var(--tg-button);
+  background: rgba(90, 163, 240, 0.12);
+}
+
+.card__check {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  border: 2px solid var(--tg-hint);
+  border-radius: 6px;
+}
+
+.card__check.is-checked {
+  border-color: var(--tg-button);
+  background: var(--tg-button);
+  position: relative;
+}
+
+.card__check.is-checked::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--tg-button-text);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* A selectable card must not offer its own buttons as rival tap targets. */
+.card--selectable .card__actions,
+.card--selectable .card__tags {
+  display: none;
+}
+
+/* --- Plan sheet --- */
+
+.sheet__panel--tall {
+  max-height: 86vh;
+  overflow-y: auto;
+}
+
+.plan__summary {
+  margin: 0 0 14px;
+  font-size: 14px;
+}
+
+.plan__stop {
+  display: flex;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.plan__index {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--tg-button);
+  color: var(--tg-button-text);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 22px;
+}
+
+.plan__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plan__when {
+  color: var(--tg-hint);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.plan__title {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.plan__where,
+.plan__why {
+  color: var(--tg-hint);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.plan__link {
+  margin-top: 2px;
+  color: var(--tg-button);
+  font-size: 12px;
+}
+
+.plan__note {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(245, 159, 11, 0.14);
+  color: var(--tg-text);
+  font-size: 12px;
+}
+
 /* --- Filters --- */
 
 .filters {

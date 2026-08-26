@@ -17,12 +17,13 @@ Handlers therefore never see an unauthenticated caller.
 Run locally:  python -m app.api        (then open http://127.0.0.1:8000/docs)
 """
 
+import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from telegram import Update
+from telegram import Bot, Update
 
 from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Request, status
 from fastapi.responses import JSONResponse
@@ -35,12 +36,16 @@ from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.engine import describe
 from app.db.database import (
     get_link,
+    get_plan,
     init_db,
     is_day_trip,
     list_dates,
     list_links,
+    save_plan,
     update_link,
 )
+from app.handlers.plan_handler import next_saturday
+from app.services.planner import CLUSTER_RADIUS_METRES, plan_date
 from app.services.reminders import upcoming
 
 logger = logging.getLogger(__name__)
@@ -137,6 +142,40 @@ class DateOut(BaseModel):
     occurs_on: str
     days_until: int
     years: int | None = None
+
+
+class PlanRequest(BaseModel):
+    """Which links to plan around.
+
+    An empty or absent list means "everything eligible", which is the
+    Plan-with-all button; a list is a deliberate selection and is honoured
+    as given rather than re-clustered.
+    """
+
+    link_ids: list[int] | None = Field(
+        default=None, description="Selected link ids, or null for all eligible links"
+    )
+
+
+class PlanStopOut(BaseModel):
+    link_id: int
+    title: str
+    url: str
+    location: str | None = None
+    when: str | None = None
+    why: str | None = None
+
+
+class PlanOut(BaseModel):
+    id: int | None = None
+    week_of: str
+    summary: str | None = None
+    stops: list[PlanStopOut] = []
+    text: str
+    # Selected links that could not be used, with the reason, so the app can
+    # say why rather than appearing to lose them.
+    excluded: dict[int, str] = {}
+    spread_metres: int = 0
 
 
 class LinkUpdate(BaseModel):
@@ -327,6 +366,109 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("serving Mini App from %s at /miniapp", MINIAPP_DIR)
     else:  # pragma: no cover - only if the directory is missing
         logger.warning("Mini App directory not found at %s", MINIAPP_DIR)
+
+    @app.post(
+        "/api/plan",
+        response_model=PlanOut,
+        tags=["plan"],
+        summary="Build a date plan from all eligible links, or from a selection",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def create_plan(
+        payload: PlanRequest,
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> PlanOut:
+        """Same plan_date() the scheduled job uses, so the two cannot drift.
+
+        The result is filed immediately: it is a generated plan either way, and
+        storing it here means posting it later needs only an id rather than
+        trusting text sent back from the client.
+        """
+        logger.info(
+            "plan requested by user %s for %s",
+            user.id,
+            f"{len(payload.link_ids)} selected link(s)" if payload.link_ids else "all eligible links",
+        )
+        rows = await asyncio.to_thread(list_links, settings.db_path)
+        plan = await asyncio.to_thread(
+            plan_date,
+            rows,
+            settings.gemini_api_key,
+            settings.gemini_model,
+            None,
+            CLUSTER_RADIUS_METRES,
+            payload.link_ids,
+        )
+        if not plan.ok:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": plan.error, "excluded": plan.excluded},
+            )
+
+        week_of = next_saturday().isoformat()
+        text = plan.render()
+        plan_id = await asyncio.to_thread(save_plan, settings.db_path, week_of, text)
+        return PlanOut(
+            id=plan_id,
+            week_of=week_of,
+            summary=plan.summary,
+            stops=[
+                PlanStopOut(
+                    link_id=s.link_id,
+                    title=s.title,
+                    url=s.url,
+                    location=s.location,
+                    when=s.when,
+                    why=s.why,
+                )
+                for s in plan.stops
+            ],
+            text=text,
+            excluded=plan.excluded,
+            spread_metres=plan.spread_metres,
+        )
+
+    @app.post(
+        "/api/plans/{plan_id}/post",
+        tags=["plan"],
+        summary="Send an already-generated plan to the group chat",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def post_plan(
+        plan_id: Annotated[int, PathParam(ge=1)],
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> dict[str, object]:
+        """Post a stored plan.
+
+        The text comes from the stored row, not from the request, so what
+        reaches the group is exactly what was generated and shown - a client
+        cannot use this to broadcast arbitrary text to the chat.
+        """
+        stored = await asyncio.to_thread(get_plan, settings.db_path, plan_id)
+        if stored is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"plan {plan_id} not found"
+            )
+        row = dict(stored)
+        message = f"Plan for Saturday {row['week_of']}:\n{row['summary']}"
+
+        bot = Bot(settings.bot_token)
+        try:
+            async with bot:
+                await bot.send_message(
+                    chat_id=settings.chat_id,
+                    text=message,
+                    disable_web_page_preview=True,
+                )
+        except Exception as exc:
+            logger.exception("could not post plan %s to the group", plan_id)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"could not post to the group: {exc}",
+            ) from exc
+
+        logger.info("plan %s posted to the group by user %s", plan_id, user.id)
+        return {"ok": True, "plan_id": plan_id}
 
     @app.get(
         "/api/dates",

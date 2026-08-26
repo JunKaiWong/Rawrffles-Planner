@@ -559,6 +559,16 @@ def save_plan(db_path: str | Path, week_of: str, summary: str) -> int:
     return plan_id
 
 
+def get_plan(db_path: str | Path, plan_id: int):
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, week_of, summary, created_at FROM plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+    logger.debug("get plan id=%s -> %s", plan_id, "hit" if row else "miss")
+    return row
+
+
 def list_plans(db_path: str | Path, limit: int = 10) -> list:
     with connect(db_path) as conn:
         rows = conn.execute(

@@ -85,6 +85,12 @@ class Plan:
     error: str | None = None
     dropped: list[int] = field(default_factory=list)
     cluster_size: int = 0
+    # Links the caller asked for that could not be planned around, with why.
+    # Silently ignoring a chosen link would look like the app lost it.
+    excluded: dict[int, str] = field(default_factory=dict)
+    # How far apart the chosen stops are, so a hand-picked selection spread
+    # across the island can say so rather than pretending to be an outing.
+    spread_metres: int = 0
 
     def render(self) -> str:
         """The message the user sees.
@@ -381,31 +387,88 @@ def _call_model(prompt: str, api_key: str, model_name: str) -> tuple[str | None,
     return None, "no response from model"
 
 
+def _spread(candidates: list[Candidate]) -> int:
+    if len(candidates) < 2:
+        return 0
+    return int(
+        max(
+            distance_metres((a.lat, a.lng), (b.lat, b.lng))
+            for i, a in enumerate(candidates)
+            for b in candidates[i + 1 :]
+        )
+    )
+
+
+def _explain_exclusions(rows, chosen: set[int], usable: set[int], today: date) -> dict[int, str]:
+    """Why a explicitly chosen link did not make it into the plan."""
+    reasons: dict[int, str] = {}
+    for row in rows:
+        data = dict(row)
+        link_id = int(data["id"])
+        if link_id not in chosen or link_id in usable:
+            continue
+        if data.get("done"):
+            reasons[link_id] = "already done"
+        elif data.get("lat") is None:
+            reasons[link_id] = f"no coordinates ({data.get('geocode_status') or 'not geocoded'})"
+        elif urgency_tier(data.get("event_end"), bool(data.get("is_evergreen")), today) is None:
+            reasons[link_id] = "expired"
+        else:
+            reasons[link_id] = "not eligible"
+    return reasons
+
+
 def plan_date(
     rows,
     api_key: str,
     model_name: str,
     today: date | None = None,
     radius_metres: int = CLUSTER_RADIUS_METRES,
+    link_ids: list[int] | None = None,
 ) -> Plan:
-    """The single seam for the planning LLM call. Never raises."""
+    """The single seam for the planning LLM call. Never raises.
+
+    With `link_ids`, the caller's selection is honoured as-is rather than
+    re-clustered: someone who picked three places has already decided they
+    belong together, and quietly dropping two of them for being 3km apart would
+    be the app overruling a deliberate choice. Their spread is measured and
+    reported instead.
+    """
     today = today or date.today()
 
     candidates = select_candidates(rows, today)
-    if not candidates:
-        return Plan(ok=False, error="no candidate links with coordinates")
-
-    clusters = cluster_by_proximity(candidates, radius_metres)
-    best = clusters[0]
-    shortlist = _shortlist(best)
-    logger.info(
-        "planning around %d stop(s): %s",
-        len(shortlist),
-        [(c.id, c.title[:24], c.tier) for c in shortlist],
-    )
+    if link_ids:
+        chosen = {int(i) for i in link_ids}
+        usable = [c for c in candidates if c.id in chosen]
+        excluded = _explain_exclusions(rows, chosen, {c.id for c in usable}, today)
+        if not usable:
+            return Plan(
+                ok=False,
+                error="none of the selected links can be planned around",
+                excluded=excluded,
+            )
+        shortlist = _shortlist(usable)
+        for c in usable:
+            if c not in shortlist:
+                excluded[c.id] = f"only {MAX_STOPS} stops fit in one day"
+        cluster_size = len(usable)
+        logger.info("planning around a selection of %d link(s)", len(shortlist))
+    else:
+        if not candidates:
+            return Plan(ok=False, error="no candidate links with coordinates")
+        clusters = cluster_by_proximity(candidates, radius_metres)
+        best = clusters[0]
+        shortlist = _shortlist(best)
+        excluded = {}
+        cluster_size = len(best)
+        logger.info(
+            "planning around %d stop(s): %s",
+            len(shortlist),
+            [(c.id, c.title[:24], c.tier) for c in shortlist],
+        )
 
     if not api_key:
-        return Plan(ok=False, error="GEMINI_API_KEY is not configured")
+        return Plan(ok=False, error="GEMINI_API_KEY is not configured", excluded=excluded)
 
     prompt = PROMPT_TEMPLATE.format(
         today=today.isoformat(),
@@ -414,12 +477,12 @@ def plan_date(
     )
     raw, error = _call_model(prompt, api_key, model_name)
     if raw is None:
-        return Plan(ok=False, error=error or "model call failed")
+        return Plan(ok=False, error=error or "model call failed", excluded=excluded)
 
     payload = _extract_json(raw)
     if payload is None:
         logger.warning("planner response was not JSON: %r", raw[:200])
-        return Plan(ok=False, error="model did not return JSON")
+        return Plan(ok=False, error="model did not return JSON", excluded=excluded)
 
     # Grounding enforcement: only ids we supplied may appear, and the names the
     # user sees are taken from our own records rather than from the response.
@@ -459,7 +522,7 @@ def plan_date(
         )
 
     if not stops:
-        return Plan(ok=False, error="model returned no usable stops", dropped=dropped)
+        return Plan(ok=False, error="model returned no usable stops", dropped=dropped, excluded=excluded)
 
     summary = payload.get("summary")
     summary = _scrub_prose(str(summary).strip() if summary else None, allowed_text)
@@ -471,5 +534,7 @@ def plan_date(
         stops=stops,
         summary=summary,
         dropped=dropped,
-        cluster_size=len(best),
+        cluster_size=cluster_size,
+        excluded=excluded,
+        spread_metres=_spread(shortlist),
     )

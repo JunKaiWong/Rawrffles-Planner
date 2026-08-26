@@ -69,7 +69,34 @@
     <div class="filters__row" id="active-filters" hidden></div>
   </div>
 
+  <div class="actions">
+    <button id="plan-all-btn" class="btn btn--primary btn--sm" type="button">Plan with all</button>
+    <button id="select-btn" class="btn btn--ghost btn--sm" type="button">Select</button>
+  </div>
+
   <main id="list" class="list" aria-live="polite"></main>
+
+  <!--
+    Tap-to-select with a floating action button, deliberately not
+    drag-and-drop: drag fights the webview's own scroll and swipe gestures on
+    mobile and is a reliable source of bugs.
+  -->
+  <button id="plan-selected-fab" class="fab" type="button" hidden>
+    Plan with these (<span id="selected-count">0</span>)
+  </button>
+
+  <div id="plan-sheet" class="sheet" hidden>
+    <div class="sheet__backdrop" data-close-plan="1"></div>
+    <div class="sheet__panel sheet__panel--tall">
+      <h2 class="sheet__title" id="plan-title">Your plan</h2>
+      <p class="sheet__subtitle" id="plan-week"></p>
+      <div id="plan-body" class="plan"></div>
+      <div class="sheet__actions">
+        <button type="button" class="btn btn--ghost" data-close-plan="1">Close</button>
+        <button type="button" class="btn btn--primary" id="post-plan-btn">Post to group</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Empty / error / loading states share one region. -->
   <div id="status" class="status" hidden></div>
