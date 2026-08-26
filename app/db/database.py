@@ -30,12 +30,17 @@ _EXPECTED_LINK_COLUMNS = {
     "region": "TEXT",
     "category": "TEXT",
     "subcategory": "TEXT",
-    # Reserved for the geocoding step, which is not built yet; they stay NULL
-    # until then but are part of the documented schema.
+    # Filled by geocoding; NULL when the location could not be resolved, with
+    # geocode_status recording why.
     "lat": "REAL",
     "lng": "REAL",
     # Set once a caption has been parsed, so it is never parsed twice.
     "parsed_at": "TEXT",
+    # Set once geocoding has been attempted, so it runs once per link rather
+    # than per plan. Separate from lat/lng because a failure is a real outcome:
+    # NULL coordinates plus a status is not the same as never having tried.
+    "geocoded_at": "TEXT",
+    "geocode_status": "TEXT",
 }
 
 # Links outside this region are kept and browsable but excluded from MRT-based
@@ -411,7 +416,7 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
             "region, category, subcategory, lat, lng, tags, added_by, added_at, "
             "done, done_at, done_by, "
             "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
-            "parsed_at "
+            "parsed_at, geocode_status "
             "FROM links ORDER BY added_at DESC, id DESC"
         ).fetchall()
     logger.info("listed %d link(s)", len(rows))
@@ -425,7 +430,7 @@ def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
             "region, category, subcategory, lat, lng, tags, added_by, added_at, "
             "done, done_at, done_by, "
             "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
-            "parsed_at "
+            "parsed_at, geocode_status "
             "FROM links WHERE id = ?",
             (link_id,),
         ).fetchone()
@@ -485,6 +490,60 @@ def update_link(
         ", ".join(updates),
     )
     return get_link(db_path, link_id)
+
+
+def save_geocode(
+    db_path: str | Path,
+    link_id: int,
+    status: str,
+    lat: float | None = None,
+    lng: float | None = None,
+    geocoded_at: str | None = None,
+) -> None:
+    """Record the outcome of geocoding a link.
+
+    geocoded_at is always written, including for a failure, because the marker
+    is what makes this once-per-link: a link OneMap cannot place should not be
+    looked up again on every planning run.
+    """
+    geocoded_at = geocoded_at or utc_now_iso()
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE links SET lat = ?, lng = ?, geocode_status = ?, geocoded_at = ? "
+            "WHERE id = ?",
+            (lat, lng, status, geocoded_at, link_id),
+        )
+    logger.info(
+        "geocode recorded for id=%s: status=%s coords=%s",
+        link_id,
+        status,
+        f"{lat},{lng}" if lat is not None else "none",
+    )
+
+
+def links_needing_geocode(db_path: str | Path) -> list:
+    """Links never put through geocoding.
+
+    geocoded_at IS NULL is the whole check, so a link that failed is not
+    retried automatically - re-running is a deliberate act.
+    """
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, platform, title, location, region "
+            "FROM links WHERE geocoded_at IS NULL ORDER BY id"
+        ).fetchall()
+    logger.info("%d link(s) awaiting geocoding", len(rows))
+    return rows
+
+
+def links_for_regeocode(db_path: str | Path) -> list:
+    """Every link with a location, ignoring the once-only marker."""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, url, platform, title, location, region FROM links ORDER BY id"
+        ).fetchall()
+    logger.info("%d link(s) selected for forced re-geocoding", len(rows))
+    return rows
 
 
 def add_date(

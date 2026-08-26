@@ -1,327 +1,324 @@
 # Couple's Planner Bot
 
 A private Telegram bot for two people. Paste TikTok/Instagram links into a shared
-group chat, and the bot extracts what they're about, remembers them, and every
-Saturday proposes a date plan built from that week's dumped links plus real
-local-event data. It also tracks anniversaries/important dates and shared
-availability.
+group chat; the bot extracts what they're about, categorises them, and stores
+them in a browsable Mini App. It tracks anniversaries and important dates, and
+(not yet built) proposes a Saturday date plan from saved links.
 
-## Why Telegram (not a native app)
+**The primary goal is a tidy, filterable store of saved posts.** The planner is
+secondary — it has been deferred repeatedly and that was correct each time.
 
-Telegram gives us auth (user IDs), push delivery (`sendMessage`), and cross-device
-sync for free — no APK builds, no Play Store fee, no notification permission
-handling. The bot lives in one private group containing both users.
+## Current status
 
-## Two surfaces, one backend
+**Live in production.** Deployed on Render, database on Neon Postgres, both
+users allowlisted, Mini App opening from the Telegram group.
 
-Plain bot chat is bad at "browse a list" and "mark something done" — those need
-a real UI. So the project has two front ends sharing one backend/database:
+| Feature | Status |
+|---|---|
+| Link intake (TikTok + Instagram, all URL shapes) | Done |
+| Canonical URL resolution + dedup | Done |
+| Extraction chain (yt-dlp → oEmbed → screenshots) | Done |
+| Gemini parsing: title, location, dates, region, category, tags | Done |
+| Screenshot/vision path, incl. multi-slide albums | Done |
+| REST API with initData auth + user allowlist | Done |
+| Mini App: To visit / Done / Day trips, filters, rating + note | Done |
+| Anniversary countdowns + daily reminders | Done |
+| Geocoding (lat/lng) | **Not built** |
+| `plan_date()` — the planner | **Not built** |
+| Shared availability calendar | **Not built** |
+| Same-venue grouping across posts | Deferred deliberately |
 
-- **Bot (chat)**: link capture (paste a URL, it gets stored), weekly AI plan
-  delivery, reminder/anniversary pushes. Stays lightweight — notifications only.
-- **Mini App (Telegram WebApp)**: a real web UI opened via a button in the chat
-  (or the group's menu button). This is where the actual browsing happens —
-  a list of all stored links split into **To visit** / **Done**, with a tap
-  to toggle a link's status. Built as a static page (HTML/CSS/JS or React),
-  hosted for free, using Telegram's WebApp JS SDK for identity — no separate
-  login system needed. Talks to the same backend via normal REST calls.
+## Architecture
 
-## Core features
+Two front ends, one backend:
 
-1. **Link intake** — any message in the group containing a TikTok or Instagram
-   URL is caught by the bot, metadata extracted, and stored.
-2. **AI planner — two modes**:
-   - *Manual*: user multi-selects links in the Mini App, taps "Plan with these",
-     gets a plan back immediately. Use tap-to-select checkboxes with a floating
-     action button, **not drag-and-drop** — drag fights the webview's own scroll
-     and swipe gestures on mobile and is a reliable source of bugs.
-   - *Auto*: a Friday cron job picks the top-scoring unexpired links itself and
-     posts a suggested Saturday plan to the group.
-   Both paths call the same `plan_date(links)` function.
-3. **Local event lookup** — supplements link-derived ideas with real event data
-   (concerts, things happening nearby) rather than scraping social feeds.
-4. **Reminders / countdowns** — daily cron checks a dates table and posts when
-   an anniversary or important date is within N days.
-5. **Shared availability** — lightweight scheduling: either inline-keyboard
-   slot picking in chat, or (stretch goal) a Telegram Mini App with a real
-   calendar UI.
+- **Bot (chat)**: link capture, reminder pushes, plan delivery. Notifications
+  and intake only — kept deliberately thin.
+- **Mini App (Telegram WebApp)**: where browsing actually happens. Plain
+  HTML/CSS/JS served from the same FastAPI service, so it's same-origin (no
+  CORS). Uses `telegram-web-app.js` for identity and theming.
 
-## Explicitly out of scope
+**Deployment:**
 
-- No auto-scraping of TikTok/Instagram/Lemon8 feeds or hashtags. Only link
-  extraction for URLs the users themselves paste. Do not add bulk scraping,
-  proxy rotation, or feed-crawling code.
-- No native Android app, no Play Store distribution.
+- **Render free tier** — one service hosting bot webhook, API, and Mini App.
+  Sleeps after ~15 min idle with ~1 min cold start. Acceptable for two users.
+- **Neon free Postgres** — permanent free tier, no card, scale-to-zero.
+- **GitHub Actions** — runs the scheduled jobs. Required because a sleeping
+  Render service cannot fire its own schedules. In webhook mode APScheduler is
+  deliberately disabled so the two never double-post; under local polling
+  APScheduler runs them instead.
+- **Transport is webhook**, selected via `TELEGRAM_TRANSPORT`. Polling still
+  works for local dev. Never run local polling while Render is live — two
+  clients on one token split updates unpredictably.
 
-## Tech stack (all free-tier)
+## Tech stack
 
-**Language: Python.** Chosen deliberately — `yt-dlp` is a native Python package,
-so link extraction is a library import rather than subprocess parsing.
-Development uses a virtualenv at `venv/` (gitignored).
+**Language: Python.** Chosen because `yt-dlp` is a native Python package, so
+extraction is a library import rather than subprocess parsing. Local dev uses a
+virtualenv at `venv/`.
 
 - **Bot**: `python-telegram-bot`
-- **REST API** (serves the Mini App): `fastapi` + `uvicorn`
-- **Link metadata**: `yt-dlp` used as a library for TikTok; lightweight
-  public-URL metadata fetch for Instagram (captions/hashtags only, single-URL
-  requests, no bulk crawling).
-- **Scheduled jobs**: `apscheduler` (weekly plan, daily reminders)
-- **AI planning calls**: `google-genai` against the Gemini free tier (primary).
-  Note: the older `google-generativeai` package is end-of-life (Nov 2025) — do
-  not use it. Anthropic API is an alternate if trial credits are available.
-  Keep the LLM call behind a single `plan_date()` function so the provider can
-  be swapped without touching the rest of the code.
-  **Free tier is ~5 requests/minute** — pace backfills, retry on rate limit, and
-  never split work across two calls that could be done in one.
-- **Local events**: Ticketmaster Discovery API and/or Eventbrite API free tiers.
-- **Database**: built-in `sqlite3` (two users, low volume). Swap to Postgres
-  only if the hosting provider makes that easier.
-- **Env vars**: `python-dotenv`
-- **Hosting**: Railway, Render, or Fly.io free tier, using Telegram webhook mode.
-  Cron jobs run as scheduled tasks on the same host (or Railway's cron feature).
-- **Mini App frontend**: plain HTML/CSS/JS (or React if it grows) served as
-  static files from the same host, or a free static host (Vercel/Netlify).
-  Uses `telegram-web-app.js` (Telegram's WebApp SDK) for identity/theming.
-  Backend exposes a small REST API (`GET /links`, `PATCH /links/:id`) that both
-  the bot and the Mini App call.
-- **Secrets**: `.env` file, never committed. `TELEGRAM_BOT_TOKEN`,
-  `TELEGRAM_CHAT_ID`, `ALLOWED_USER_IDS`, `GEMINI_API_KEY`,
-  `ANTHROPIC_API_KEY` (optional), `TICKETMASTER_API_KEY`.
+- **API**: `fastapi` + `uvicorn`
+- **Extraction**: `yt-dlp` (library), TikTok oEmbed endpoint
+- **LLM**: `google-genai` against the Gemini free tier. The older
+  `google-generativeai` package is end-of-life (Nov 2025) — do not use it.
+- **Database**: Postgres (Neon) in production; SQLite still supported for local
+  dev via a small engine-compat module. Not an ORM.
+- **Scheduling**: GitHub Actions in production, `apscheduler` locally
+- **Geocoding** (when built): OneMap — free, Singapore-accurate, MRT-aware.
+  Search needs no auth; routing needs a free token.
 
-## Project structure (target)
+### Secrets
 
-```
-/app
-  bot.py                    # webhook entrypoint, message routing
-  api.py                    # FastAPI routes for the Mini App (links CRUD)
-  auth.py                   # chat allowlist + initData validation middleware
-  handlers/
-    link_handler.py         # detects + extracts TikTok/IG links
-    reminder_handler.py     # availability + reminder commands
-  services/
-    extractor.py            # wraps yt-dlp
-    ai_planner.py           # plan_date() — single seam for the LLM call
-    events.py               # Ticketmaster/Eventbrite lookups
-  db/
-    schema.sql
-    database.py
-  jobs/
-    weekly_plan.py
-    daily_reminders.py
-/miniapp
-  index.html                # link list UI (To visit / Done)
-  app.js                    # fetch calls to /api, Telegram WebApp SDK init
-  style.css
-requirements.txt
-.env.example
-.gitignore                  # must contain .env and venv/
-CLAUDE.md
-```
+`.env.planner` locally (gitignored), Render environment in production, and
+GitHub Actions **repository** secrets (not environment secrets — the workflow
+does not declare an environment) for the scheduled jobs.
 
-## Location, clustering, and travel
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ALLOWED_USER_IDS`, `GEMINI_API_KEY`,
+`DATABASE_URL`, `WEBHOOK_URL`, `WEBHOOK_SECRET`.
 
-Plans must be geographically coherent — the couple travels by MRT, so stops
-should be near each other.
+## Hard-won operational notes
 
-**Geocoding**: use OneMap (Singapore Land Authority) — free, locally accurate,
-MRT-aware. Address search needs no authentication; routing requires a free
-registered token. Store `lat` / `lng` on each link once resolved, so geocoding
-happens once per link, never per plan.
+Things that cost real debugging time. Read before touching related code.
 
-Pipeline order (each step blocks the next):
-1. Caption → structured JSON, including a `location` string.
-2. `location` string → lat/lng via OneMap search.
-3. **Cluster candidates in code**, not in the prompt. Compute proximity and
-   hand the LLM a pre-grouped shortlist. Asking the model to "keep things close
-   together" from raw addresses is unreliable; distance is deterministic.
-4. Call OneMap public-transport routing for real MRT journey times between the
-   chosen stops, and pass those into the prompt as facts.
+- **Gemini free tier is ~20 requests/day/model**, not just ~5/minute. Quota is
+  per-model, so a fallback chain (`gemini-3.6-flash` → `gemini-3.5-flash` →
+  `gemini-flash-latest`) multiplies the daily budget. `gemini-3.7-flash` works
+  but 503s frequently — bad default for unattended intake.
+- **Verify model strings with a real call.** `models.list()` reports models that
+  404 when actually invoked. Listed ≠ callable.
+- **TikTok video extraction breaks intermittently.** "Unable to extract
+  universal data for rehydration" is a TikTok-side change, not a stale yt-dlp —
+  and it is intermittent, not total (the same URL can fail then succeed 20
+  minutes later). TikTok serves different structures by region/client. The
+  oEmbed fallback exists precisely for this.
+- **oEmbed needs the full `www.tiktok.com` form.** Canonicalisation strips
+  `www.`, and oEmbed 400s without it. It also 400s on photo posts, and 429s on
+  bursts — pace it with a shared lock, not per-caller courtesy.
+- **`WEBHOOK_SECRET` must be `A-Za-z0-9_-` only.** Telegram rejects base64
+  characters (`+`, `/`, `=`). Generate with
+  `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Render's
+  `generateValue` produces base64 and cannot be constrained, so it is set
+  manually. Validated at startup rather than failing opaquely at `setWebhook`.
+- **`WEBHOOK_URL` chicken-and-egg**: the app refuses to start without it, but
+  Render doesn't reveal the URL until a service exists. Prefer deriving it from
+  `RENDER_EXTERNAL_URL` when unset.
+- **Postgres vs SQLite row access**: `sqlite3.Row` supports positional indexing;
+  psycopg dict rows do not. Select counts under a name and read them by name.
+- **Copying rows with explicit IDs doesn't advance Postgres's identity
+  counter** — call `setval` after a migration or the next insert collides.
+- **Upgrading yt-dlp doesn't affect an already-running process.** Retry passes
+  must run in a fresh subprocess or they test the old code and report failures
+  the upgrade just fixed.
+- **`localStorage` is per-origin**: `127.0.0.1` and `localhost` are different
+  origins. Use one consistently.
+- **Adding a group member can convert it to a supergroup**, changing
+  `chat_id`. `/chatid` is deliberately not allowlisted so it still works when
+  the allowlist is stale.
 
-### Grounding rule (important)
+## Extraction
 
-**The LLM arranges and explains; it never originates a place name.** Every venue
-in a generated plan must trace back either to a saved link or to a real search
-result. Do not let the model suggest restaurants or activities from its own
-knowledge — it will produce closed venues and plausible-sounding places that
-don't exist, and the failure is discovered in person.
+**Fallback chain** — no user action should be required:
 
-When the saved links don't cover a gap (e.g. no food saved near the anchor
-point), query OneMap's thematic layers for real nearby amenities and pass those
-results into the prompt as the candidate set. If no real candidate exists, the
-plan should say so rather than inventing one.
+1. `yt-dlp` — best quality when it works. It scrapes, so it breaks periodically.
+2. **TikTok oEmbed** (`https://www.tiktok.com/oembed?url=`) — a published API,
+   not a scrape, so it survives what breaks yt-dlp. Returns the caption as
+   `title` plus a `thumbnail_url`. Feed the caption to the parser *and* the
+   thumbnail through the vision path — cover frames usually carry text overlays
+   with the dish, price, or venue.
+3. Only if both fail, ask the user for a screenshot.
 
-### Same-venue detection across posts (deferred — do not build yet)
+**Photo and carousel posts** (TikTok slideshows, Instagram `/p/` posts) cannot
+be extracted at all. Do NOT scrape slide image URLs — fragile, and it sends the
+model irrelevant slides. Instead the users screenshot the informative slide and
+send it to the group with the post URL in the photo's caption.
 
-Dedup currently works on canonical URL only, so two influencers posting about
-the same restaurant — or the same venue on TikTok and Instagram — produce two
-unrelated rows.
+- Albums arrive as separate messages sharing a `media_group_id`, buffered with a
+  debounce and sent to Gemini in **one** call.
+- A screenshot for an already-saved link **enriches** that row rather than being
+  rejected as a duplicate — the real workflow is paste URL now, screenshot
+  later.
+- `+photo` in the caption overrides the skip for links that already have one.
+- Store Telegram `file_id`s, never image files. Telegram re-serves them free.
 
-When this is addressed: **group, don't merge.** Two posts about one place is
-useful signal (independent recommendations, and each post may carry different
-details). Use a nullable `venue_group_id` so grouped links stay separate rows
-and the Mini App can stack them ("Cafe De Paris — 2 saved posts").
+**Report the outcome, not the stage.** A link whose yt-dlp attempt failed but
+whose vision parse succeeded has NOT failed. Conflating the two produces scary
+warnings on working links, which trains the user to ignore warnings.
 
-Never auto-merge. Chain outlets ("Cafe De Paris, Orchard" vs "…, Tampines") are
-different outings, and a silent merge destroys information without telling
-anyone. Flag suspected matches for confirmation instead.
+## Parsing and categorisation
 
-Detection should use fuzzy matching on extracted `title` + `location`, and
-becomes far more reliable once geocoding provides coordinates — so build
-geocoding first.
+One Gemini call per link produces everything: `title`, `location`, `region`,
+`event_start`, `event_end`, `is_evergreen`, `category`, `subcategory`, `tags`.
+Never split into two calls — quota is the binding constraint.
 
-**Deferred deliberately**: a similarity threshold cannot be tuned against a
-handful of links. Collect ~50 real links first and measure how often this
-actually occurs before building anything.
+**Fixed categories, free tags.** Free-form category naming fragments fast
+("Japanese" / "japanese food" / "Jap cuisine"), so the model picks from a closed
+list, enforced in code (invalid value → `other`, logged):
 
-## Database (starting schema)
-
-- `links(id, url, platform, caption, tags, added_by, added_at, done boolean
-  default false, done_at, done_by, rating integer, note text, photo_file_id text,
-  event_start date, event_end date, is_evergreen boolean default true,
-  location text, lat real, lng real,
-  category text, subcategory text, tags text)`
-
-### Time-sensitivity
-
-Links are not timeless. A restaurant is evergreen; a pop-up market runs for one
-weekend. `event_start` / `event_end` are nullable; `is_evergreen` is true when
-there's no expiry.
-
-**Extraction**: dates usually appear in the caption ("till 31 Aug", "this
-weekend only"). At intake, call the LLM to parse the caption into structured
-JSON `{title, location, event_start, event_end, is_evergreen}`. Do not attempt
-this with regex. This is a small, cheap call, separate from `plan_date()`.
-
-**TikTok photo/slideshow posts**: `yt-dlp` cannot extract these — it returns
-"Unsupported URL" and only the canonical URL is recoverable. Do NOT solve this
-by scraping slide image URLs from TikTok's page structure; that's fragile and
-sends the model irrelevant slides.
-
-Instead, the users screenshot the one slide that matters and send it to the
-group with the post URL in the photo's caption. One message carries both. The
-link handler already reads photo captions, so intake is unchanged. Store the
-Telegram `file_id` in `photo_file_id` (free hosting, and it doubles as the
-Mini App thumbnail), and pass the image to Gemini's vision model asking for the
-same structured JSON the caption parser returns — same schema, same output
-shape, one code path.
-
-Optional later improvement: TikTok's public oEmbed endpoint
-(`https://www.tiktok.com/oembed?url=`) is a single unauthenticated GET that
-often returns caption text for photo posts. Nice-to-have, not load-bearing.
-
-**Categorisation happens in the same Gemini call as caption parsing** — same
-quota, no second pass. The primary goal of this app is a tidy, filterable store
-of saved posts, so this field set matters more than the planner.
-
-Use fixed categories plus free tags. Free-form category naming fragments fast
-("Japanese" / "japanese food" / "Jap cuisine" become separate filter values), so
-the model picks from a closed list:
-
-- `category` — exactly one of: `food` | `activity` | `place` | `other`
-- `subcategory` — exactly one, from a fixed list per category:
+- `category` — one of: `food` | `activity` | `place` | `other`
+- `subcategory` — one from a fixed list per category:
   - food: japanese, korean, chinese, local/hawker, western, thai, indian,
     cafe/dessert, other
   - activity: sports, hiking/nature, event/festival, arts/museum, workshop,
-    nightlife, other
+    nightlife, wellness/spa, other
   - place: bar, staycation, shopping, scenic/view, other
-- `tags` — free-form, 0–5, for detail that doesn't deserve a category
-  ("halal", "rooftop", "cheap eats", "queue long")
+- `tags` — free-form, 0–5 ("halal", "rooftop", "cheap eats", "queue long")
 
-The fixed pair drives filter UI; tags add richness. **Instruct the model to
-return `other` rather than guess** when the caption is ambiguous — a confidently
-wrong category silently hides links from filtered views.
+**Return `other` rather than guess.** A confidently wrong category silently
+hides links from filtered views. `other/other` is an honest shrug, not content.
 
-This also simplifies planning later: "one food + one activity nearby" becomes a
-database query rather than something the LLM must infer.
+**Cache everything.** `parsed_at` marks a link as asked-about, including
+caption-less posts skipped without a model call. A planning run must never
+re-spend quota. Failed parses leave `parsed_at` NULL so they stay retryable.
 
-**Cache all parsed results.** Parse each link once at intake and store the
-result. Never re-analyze on a planning run — that's the difference between
-staying inside the Gemini free tier and exhausting it.
+**Region**: non-Singapore links get flagged and shown under **Day trips**,
+excluded from Saturday clustering but never hidden or deleted. Unknown region
+counts as home — an unparsed link falling into the normal planner is a visible
+failure; one silently hidden is not.
 
-**Priority scoring happens in code, not in the prompt.** Compute an urgency
-tier before calling the LLM:
+## Time-sensitivity and priority
+
+`event_start` / `event_end` nullable; `is_evergreen` true when there's no expiry.
+
+**Priority scoring happens in code, not in the prompt:**
 - ends within 7 days → `urgent`
 - ends within 30 days → `soon`
-- `is_evergreen` → `flexible`
+- evergreen → `flexible`
 
-Pass the sorted, tiered list into the prompt and instruct the model to build the
-plan around the urgent items and use flexible ones as filler. Never ask the LLM
-to do the prioritization itself — it's inconsistent and hard to debug.
+Pass the sorted, tiered list to the model and tell it to build around urgent
+items. Never ask the LLM to prioritise — inconsistent and hard to debug.
 
-Expired links (`event_end` in the past, not done) should be filtered out of
-planning input and visually de-emphasized in the Mini App, not deleted.
+Expired links are filtered from planning input and dimmed in the Mini App, not
+deleted.
 
-### The "Done" flow
+## Reminders
 
-Marking something done captures more than a status flip:
-- `rating` (1–10, nullable) — feeds back into `plan_date()` so the AI learns what
-  the couple actually enjoys. This is the highest-value field in the schema.
-- `note` (free text) — practical detail, e.g. "go before 7pm or you queue".
-- `photo_file_id` — **do not store image files**. When a photo is sent to the
-  bot, Telegram returns a `file_id` string; store that string and hand it back
-  to Telegram to re-serve the image. Zero storage cost.
+Milestone-based announcements at **30/14/7/3/1/0 days** out — not a rolling
+window. A reminder arriving every morning for a month gets muted, and a muted
+reminder is a deleted feature.
 
-UI: Mini App tap Done → rating + note → save. Photos attach by replying with an
-image in the group chat, which the bot links to the most recently completed entry.
-- `dates(id, label, date, recurring boolean)`  — anniversaries/important dates
-- `availability(id, user_id, day, slot, available boolean)`
-- `plans(id, week_of, summary, created_at)`  — generated Saturday plans, for history
+Recurring dates roll to next year once passed and carry an anniversary count
+("Together (6th)"). Past one-offs disappear. 29 February is observed on 28
+February in common years so it stays in its own month.
+
+The Mini App shows only the nearest date as a banner above the list. Dates load
+in parallel with links and fail independently — a dates problem must not leave
+the user staring at an empty list.
+
+## The "Done" flow
+
+- `rating` (1–10) — feeds back into `plan_date()` so it learns what they enjoy.
+  The highest-value field in the schema.
+- `note` — practical detail ("go before 7pm or you queue")
+- `photo_file_id` — Telegram file_id list, never image bytes
+
+## Database
+
+`links(id, url, canonical_url, platform, caption, title, tags, added_by,
+added_at, parsed_at, source, done, done_at, done_by, rating, note,
+photo_file_id, event_start, event_end, is_evergreen, location, region, lat, lng,
+category, subcategory)`
+
+`dates(id, label, date, recurring)` · `availability(id, user_id, day, slot,
+available)` · `plans(id, week_of, summary, created_at)`
+
+Note: `photo_file_id` currently holds a comma-separated list — a denormalised
+shortcut. A `link_photos` table is the clean version; migrate before the Mini
+App renders multiple images per link.
+
+## Security
+
+Private two-person app; bots are publicly discoverable by username, so access is
+restricted in code, not just BotFather settings.
+
+- **Chat allowlist**: first thing the webhook handler does is compare
+  `chat.id` against `TELEGRAM_CHAT_ID`. Anything else gets a silent 200 — no
+  reply, no error. Must run *before* any parsing or LLM call so an unauthorised
+  chat cannot consume quota.
+- **Webhook secret**: required in webhook mode, not optional. The endpoint is
+  public and carries no `initData`, so the secret token is the only proof an
+  update came from Telegram.
+- **Mini App auth**: verify the `initData` HMAC-SHA256 signature (keyed with the
+  bot token) before trusting any user ID, then check it against
+  `ALLOWED_USER_IDS`. Signature proves a real Telegram user; the allowlist
+  proves it's one of ours. Implemented as middleware every route passes through,
+  with a fail-closed helper that 500s if reached without it.
+- Constant-time comparison; identical `{"detail": "unauthorised"}` for every
+  rejection so a caller can't learn which check failed.
+- `/setjoingroups` disabled in BotFather.
+
+## Remaining work
+
+### 1. Geocoding (blocks the planner)
+
+OneMap search (no auth) turns each link's `location` string into `lat`/`lng`,
+stored once per link. Non-Singapore locations must fail gracefully and keep
+their day-trip flag. Vague locations ("McDonald's") have no single answer —
+handle rather than crash.
+
+### 2. `plan_date()`
+
+Cluster candidates by proximity **in code**, compute urgency tiers **in code**,
+then hand the pre-grouped shortlist to Gemini to arrange.
+
+**Grounding rule — the LLM arranges and explains; it never originates a place
+name.** Every venue must trace back to a saved link or a real search result.
+The model will otherwise produce closed venues and plausible-sounding places
+that don't exist, and the failure is discovered in person. When links don't
+cover a gap, query OneMap's thematic layers for real nearby amenities and pass
+those as the candidate set. If no real candidate exists, say so.
+
+Then call OneMap public-transport routing for real MRT journey times and pass
+those into the prompt as facts.
+
+Two modes, one function: *manual* (multi-select in the Mini App → "Plan with
+these") and *auto* (Friday job picks top-scoring unexpired links). Use
+tap-to-select checkboxes, **not drag-and-drop** — drag fights the webview's own
+scroll and swipe gestures on mobile.
+
+A planning run makes several calls against a ~20/day/model ceiling. Budget for
+it. With few saved links, plans will legitimately be thin — that's a data
+shortage, not a bug.
+
+### 3. Same-venue grouping (deferred)
+
+Dedup works on canonical URL only, so two influencers posting about the same
+restaurant produce unrelated rows.
+
+**Group, don't merge.** Two posts about one place is useful signal, and each may
+carry different details. Use a nullable `venue_group_id` so rows stay separate
+and the Mini App can stack them. Never auto-merge — chain outlets ("Cafe De
+Paris, Orchard" vs "…, Tampines") are different outings, and a silent merge
+destroys information without telling anyone.
+
+Needs geocoding first, and needs ~50 real links before a similarity threshold
+can be tuned. Do not build against a handful of rows.
+
+### 4. Shared availability
+
+Lightweight: inline-keyboard slot picking, or a Mini App calendar view.
+
+## Out of scope
+
+- No auto-scraping of TikTok/Instagram/Lemon8 feeds or hashtags. Only links the
+  users paste themselves. No bulk scraping, proxy rotation, or feed crawling.
+- No native Android app, no Play Store distribution.
+- No paid hosting tiers without asking first — free-tier constraints are a
+  deliberate design input, not an obstacle to engineer around.
 
 ## Conventions
 
 - **This file can be wrong.** If a dependency, model name, or API named here is
-  deprecated or no longer available, say so and ask before implementing it —
-  don't follow stale guidance just because it's written down. Verify model
-  strings and package versions against the live API rather than assuming.
-- Keep the AI provider call isolated in one function (`plan_date()`); don't
-  scatter provider-specific code across handlers.
-- Every external API call (yt-dlp, Gemini, Ticketmaster) should fail gracefully
-  — if metadata extraction fails for a link, still store the raw URL rather
-  than dropping the message.
-- No secrets in code or commits. `.env` is gitignored.
-- Favor small, testable functions per handler over one large bot.js file.
-
-## Manual setup done before coding (assume complete)
-
-Bot created via @BotFather, privacy mode disabled, bot added to a private
-two-person group, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` already in `.env`.
-
-## Security requirement
-
-This is a private two-person app. Bots are publicly discoverable by username,
-so access must be restricted in code, not just via BotFather settings.
-
-**Chat allowlist (webhook)**: the very first thing the webhook handler does is
-compare `update.message.chat.id` against `TELEGRAM_CHAT_ID`. Any other chat is
-silently ignored with a 200 response — no reply, no error. This check must come
-*before* any link parsing or LLM call, so an unauthorized group cannot consume
-API quota.
-
-**User allowlist (Mini App)**: the Mini App sends
-`window.Telegram.WebApp.initData` with every API request. The backend MUST
-verify its HMAC-SHA256 signature (keyed with the bot token) before trusting any
-user ID from it — unvalidated `initData` is forgeable. After validating the
-signature, additionally check the user ID against `ALLOWED_USER_IDS` (a
-comma-separated env var holding the two users' numeric Telegram IDs). Signature
-validation proves a real Telegram user; the allowlist proves it's one of ours.
-
-Implement both as middleware that every route passes through; no route may skip
-either check.
-
-Also set `/setjoingroups` to Disable in BotFather (after the bot has joined the
-group) so it cannot be added to new groups.
-
-## First session goals
-
-1. `/init`-style scaffold: repo structure above, `.env.example`, requirements.txt.
-2. Wire up the Telegram webhook + a basic echo/ping to confirm the bot responds
-   in the group. **Stop here and verify before building features** — this single
-   milestone proves the token, privacy setting, webhook, and deployment are all
-   correct. Debugging plumbing later, mid-feature, is far more expensive.
-3. Implement link detection + yt-dlp extraction + DB storage.
-4. Build the REST API (`GET /links`, `PATCH /links/:id`) and the Mini App list
-   view (To visit / Done) against it — this is the feature the user actually
-   asked for first, prioritize it before the AI planning call.
-5. Implement `plan_date()` against Gemini free tier with a stub event list.
-6. Wire the weekly and daily cron jobs.
-7. Availability + reminders last — these are the lowest-risk, most mechanical
-   pieces.
+  deprecated or unavailable, say so and ask before implementing — don't follow
+  stale guidance because it's written down. Verify against the live API.
+- Keep the LLM call isolated in one function per purpose so providers can be
+  swapped without touching handlers.
+- Every external call must fail gracefully — a failed extraction still stores
+  the raw URL rather than dropping the message.
+- **Make failure modes legible.** When something can't work, say which thing and
+  why, name the constraint, and suggest the fix. Silent failure and opaque
+  errors both cost more than they save.
+- **Give the human an override.** Automation that makes judgment calls needs a
+  documented escape hatch (`+photo`, manual date edit, `GEMINI_MODEL`).
+- No secrets in code or commits.
+- Small, testable functions over large modules.

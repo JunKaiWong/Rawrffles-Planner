@@ -102,6 +102,9 @@ class LinkOut(BaseModel):
     subcategory: str | None = None
     lat: float | None = None
     lng: float | None = None
+    # Why coordinates are missing, when they are: "ambiguous" and "not_found"
+    # are outcomes, not the same as never having been looked up (NULL).
+    geocode_status: str | None = None
     # True when the link is outside the home region: kept and browsable, but
     # excluded from MRT-based Saturday clustering.
     is_day_trip: bool = False

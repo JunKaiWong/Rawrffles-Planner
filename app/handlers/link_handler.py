@@ -15,6 +15,7 @@ metadata cannot be extracted is still stored with its raw URL, and one link
 failing never costs the others in the same message.
 """
 
+import asyncio
 import logging
 import re
 
@@ -30,9 +31,11 @@ from app.db.database import (
     insert_link,
     is_day_trip,
     save_caption_parse,
+    save_geocode,
     split_file_ids,
 )
 from app.services.caption_parser import parse_caption_async
+from app.services.geocoder import geocode
 from app.services.extractor import extract_async
 
 logger = logging.getLogger(__name__)
@@ -255,6 +258,23 @@ async def _parse_and_store(
         subcategory=parsed.subcategory,
         tags=parsed.tags,
     )
+
+    # Geocode straight after parsing, while the location string is fresh, so it
+    # happens once per link and never during a planning run. Failure here costs
+    # nothing already stored.
+    if parsed.location:
+        try:
+            located = await asyncio.to_thread(geocode, parsed.location, parsed.region)
+            save_geocode(
+                db_path,
+                link_id,
+                status=located.status,
+                lat=located.lat,
+                lng=located.lng,
+            )
+        except Exception:
+            logger.exception("geocoding failed for id=%s", link_id)
+
     return parsed
 
 

@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS links (
     parsed_at      TEXT
 );
 
+-- Columns added after the first deployment. CREATE TABLE IF NOT EXISTS skips an
+-- existing table, so new columns need an explicit, idempotent ALTER here - the
+-- Postgres equivalent of the SQLite migration in database.py.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS geocoded_at    TEXT;
+ALTER TABLE links ADD COLUMN IF NOT EXISTS geocode_status TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_links_url       ON links (url);
 CREATE INDEX IF NOT EXISTS idx_links_canonical ON links (canonical_url);
 CREATE INDEX IF NOT EXISTS idx_links_done      ON links (done);
