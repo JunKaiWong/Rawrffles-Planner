@@ -60,13 +60,17 @@ virtualenv at `venv/`.
 - **Bot**: `python-telegram-bot`
 - **API**: `fastapi` + `uvicorn`
 - **Extraction**: `yt-dlp` (library), TikTok oEmbed endpoint
-- **LLM**: `google-genai` against the Gemini free tier. The older
-  `google-generativeai` package is end-of-life (Nov 2025) — do not use it.
+- **LLM**: `google-genai` against the Gemini free tier — the *only* provider.
+  The older `google-generativeai` package is end-of-life (Nov 2025) — do not
+  use it. Anthropic is **not** an alternate: a Claude Pro subscription does not
+  include API access, which is billed separately, so there is no free Anthropic
+  path for this project.
 - **Database**: Postgres (Neon) in production; SQLite still supported for local
   dev via a small engine-compat module. Not an ORM.
 - **Scheduling**: GitHub Actions in production, `apscheduler` locally
-- **Geocoding** (when built): OneMap — free, Singapore-accurate, MRT-aware.
-  Search needs no auth; routing needs a free token.
+- **Geocoding**: OneMap — free, Singapore-accurate, MRT-aware. Search needs no
+  auth; routing and the thematic layers need a free registered token.
+- **Live event data**: none. See the note below before reaching for one.
 
 ### Secrets
 
@@ -115,6 +119,16 @@ Things that cost real debugging time. Read before touching related code.
 - **Adding a group member can convert it to a supergroup**, changing
   `chat_id`. `/chatid` is deliberately not allowlisted so it still works when
   the allowlist is stale.
+- **There is no usable free event API for Singapore.** Verified with real
+  calls, not assumed: Eventbrite's public search (`/v3/events/search/`) returns
+  404 — the path is gone, removed in Dec 2019 to stop competitors mining their
+  catalogue, and what remains only fetches events by known id, venue or
+  organisation. Ticketmaster Discovery is alive and needs a free key, but its
+  documented coverage omits Singapore entirely. data.gov.sg is a catalogue of
+  downloadable datasets with no "near this point" query. STB's Tourism
+  Information Hub did not resolve in DNS at all. Do not re-attempt these
+  without new evidence; gap-filling should use OneMap thematic layers, which
+  cover venues rather than events.
 
 ## Extraction
 

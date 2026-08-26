@@ -5,6 +5,5 @@ yt-dlp
 requests
 apscheduler
 google-genai
-anthropic
 python-dotenv
 psycopg[binary]
