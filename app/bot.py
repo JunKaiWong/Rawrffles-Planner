@@ -75,16 +75,80 @@ async def chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     configured = getattr(allowed, "chat_id", None)
     matches = chat.id == configured
     logger.info("/chatid in chat %s (type=%s, matches config=%s)", chat.id, chat.type, matches)
-    await message.reply_text(
-        f"Chat id: {chat.id}\n"
-        f"Type: {chat.type}\n"
-        + (
-            "This matches TELEGRAM_CHAT_ID - nothing to do."
-            if matches
-            else "This does NOT match TELEGRAM_CHAT_ID.\n"
-            "Set TELEGRAM_CHAT_ID to the value above and redeploy."
-        )
+    user = update.effective_user
+    lines = [f"Chat id: {chat.id}", f"Type: {chat.type}"]
+    if user is not None:
+        # Included here too: whoever is diagnosing a chat id usually needs the
+        # user id in the same breath, and getUpdates is unavailable once the
+        # webhook is set.
+        lines.append(f"Your user id: {user.id}")
+    lines.append("")
+    lines.append(
+        "This matches TELEGRAM_CHAT_ID - nothing to do."
+        if matches
+        else "This does NOT match TELEGRAM_CHAT_ID.\n"
+        "Set TELEGRAM_CHAT_ID to the value above and redeploy."
     )
+    await message.reply_text("\n".join(lines))
+
+
+def _identity_lines(user, chat, settings) -> list[str]:
+    """Compose the /whoami body.
+
+    Separate from the handler so the wording can be checked without a live
+    Telegram update - which matters here, because once the webhook is active
+    getUpdates returns 409 and the command cannot be exercised locally.
+    """
+    allowed = getattr(settings, "allowed_user_ids", frozenset()) or frozenset()
+    lines = [f"Your Telegram user id: {user.id}"]
+    if getattr(user, "username", None):
+        lines.append(f"Username: @{user.username}")
+
+    if user.id in allowed:
+        lines.append("")
+        lines.append("You are already on ALLOWED_USER_IDS.")
+        return lines
+
+    lines.append("")
+    lines.append("You are NOT on ALLOWED_USER_IDS yet, so the Mini App will refuse you.")
+
+    # The merged list contains the other user's id, so it is only shown inside
+    # the allowlisted group - where both people already are. In any other chat
+    # this would hand a stranger someone else's id.
+    in_home_chat = (
+        chat is not None
+        and settings is not None
+        and chat.id == getattr(settings, "chat_id", None)
+    )
+    if in_home_chat:
+        merged = ",".join(str(i) for i in sorted(allowed | {user.id}))
+        lines.append("Set ALLOWED_USER_IDS to:")
+        lines.append(merged)
+    else:
+        lines.append("Send this id to whoever administers the bot.")
+    return lines
+
+
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report the caller's own user id.
+
+    Deliberately NOT behind the allowlist, for the same reason as /chatid: a
+    person who is not yet allowlisted is exactly the person who needs their id,
+    and an allowlisted-only command could never tell them. It discloses only
+    the caller's own identity, which they already know.
+    """
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    settings = context.bot_data.get("settings")
+    logger.info(
+        "/whoami from user %s (%s) in chat %s",
+        user.id,
+        user.first_name,
+        update.effective_chat.id if update.effective_chat else "?",
+    )
+    await message.reply_text("\n".join(_identity_lines(user, update.effective_chat, settings)))
 
 
 async def on_migration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,9 +236,11 @@ def build_application(settings: Settings) -> Application:
         CommandHandler("deldate", delete_date_command, filters=only_our_group)
     )
 
-    # Unrestricted on purpose - see chat_id()'s docstring. It returns nothing
-    # but the caller's own chat id.
+    # Both unrestricted on purpose - see their docstrings. They disclose only
+    # the caller's own chat and identity, and the people who need them are
+    # precisely those not yet on the allowlist.
     application.add_handler(CommandHandler("chatid", chat_id))
+    application.add_handler(CommandHandler("whoami", whoami))
     application.add_handler(
         MessageHandler(filters.StatusUpdate.MIGRATE, on_migration)
     )
