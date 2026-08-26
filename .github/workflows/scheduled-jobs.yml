@@ -59,6 +59,30 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # Every job loads the same settings, so a missing secret fails all of
+      # them - but as a Python traceback partway through a run, which reads
+      # like a code fault rather than a configuration one. Check first and say
+      # exactly which secrets are absent.
+      - name: Check required secrets are set
+        run: |
+          missing=""
+          for name in DATABASE_URL TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ALLOWED_USER_IDS GEMINI_API_KEY; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing"
+            echo ""
+            echo "Add them under Settings -> Secrets and variables -> Actions."
+            echo "Names must match exactly, including case."
+            echo ""
+            echo "All five are needed even by jobs that do not message Telegram,"
+            echo "because settings are loaded as one unit before any job runs."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 

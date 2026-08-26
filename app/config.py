@@ -44,10 +44,34 @@ class Settings:
 
 
 def _require(name: str, env_file: str) -> str:
+    """Read a required setting, or explain precisely what is missing.
+
+    Settings come from the process environment, which the env file merely
+    populates when one exists. Naming only the file was actively misleading in
+    CI and on the host, where there is no file and the value is expected to
+    come from repository secrets or the dashboard - it sent people looking for
+    a file that was never supposed to be there.
+    """
     value = (os.getenv(name) or "").strip()
-    if not value:
-        raise RuntimeError(f"{name} is missing or empty in {env_file}")
-    return value
+    if value:
+        return value
+
+    env_path = PROJECT_ROOT / env_file
+    if env_path.exists():
+        where = (
+            f"It is not set in the environment, and {env_file} exists but does "
+            f"not define it (or defines it as empty)."
+        )
+    else:
+        where = (
+            f"It is not set in the environment, and there is no {env_file} to "
+            f"read it from.\n"
+            "Running in CI or on a host? Set it as a repository secret / "
+            "dashboard environment variable.\n"
+            "Running locally? Add it to .env.planner, or point ENV_FILE at the "
+            "file that has it."
+        )
+    raise RuntimeError(f"{name} is required but missing.\n{where}")
 
 
 def _parse_user_ids(raw: str) -> frozenset[int]:
