@@ -546,6 +546,29 @@ def links_for_regeocode(db_path: str | Path) -> list:
     return rows
 
 
+def save_plan(db_path: str | Path, week_of: str, summary: str) -> int:
+    """Keep a generated plan, so past suggestions can be looked back on."""
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO plans (week_of, summary, created_at) VALUES (?, ?, ?) "
+            "RETURNING id",
+            (week_of, summary, utc_now_iso()),
+        )
+        plan_id = int(dict(cursor.fetchone())["id"])
+    logger.info("stored plan id=%s week_of=%s", plan_id, week_of)
+    return plan_id
+
+
+def list_plans(db_path: str | Path, limit: int = 10) -> list:
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, week_of, summary, created_at FROM plans "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return rows
+
+
 def add_date(
     db_path: str | Path, label: str, when: str, recurring: bool = False
 ) -> int:

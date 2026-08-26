@@ -1,0 +1,475 @@
+"""Build a date plan from saved links.
+
+The division of labour is deliberate and is the whole design:
+
+* **Code decides what is possible.** Which links are still valid, how urgent
+  each one is, and which ones are near enough to visit in one outing. Distance
+  and dates are deterministic; asking a model to "keep things close together"
+  from raw addresses produces confident nonsense.
+* **The model decides only the arrangement.** Given a shortlist that is already
+  geographically coherent, it chooses an order, times, and a sentence about why
+  the day hangs together.
+
+**Grounding is enforced structurally, not by asking nicely.** The model is
+given link ids and may only refer to stops by id; any id it did not receive is
+dropped. The rendered plan takes every venue name from the database, so even a
+model that invents "Marina Bay Sands" in its reasoning cannot get that name in
+front of the user as a stop. A plan that sends someone to a place that does not
+exist fails in person, on the day, which is the one failure worth designing
+against.
+"""
+
+import json
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
+
+from app.services.geocoder import distance_metres
+
+logger = logging.getLogger(__name__)
+
+# Two stops within this distance are treated as one outing. Roughly a short
+# bus ride or a long walk; wide enough to pair a meal with something afterwards,
+# tight enough that the day is not spent travelling.
+CLUSTER_RADIUS_METRES = 2000
+
+# Urgency tiers, computed here and passed to the model as facts.
+URGENT_DAYS = 7
+SOON_DAYS = 30
+TIER_URGENT, TIER_SOON, TIER_FLEXIBLE = "urgent", "soon", "flexible"
+_TIER_WEIGHT = {TIER_URGENT: 100, TIER_SOON: 25, TIER_FLEXIBLE: 5}
+
+MAX_STOPS = 4
+PLAN_TIMEOUT_SECONDS = 90
+TRANSIENT_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 15
+
+
+@dataclass(frozen=True)
+class Candidate:
+    id: int
+    title: str
+    url: str
+    category: str | None
+    subcategory: str | None
+    tags: str | None
+    location: str | None
+    lat: float
+    lng: float
+    tier: str
+    event_end: str | None
+    rating: int | None
+
+
+@dataclass
+class Stop:
+    link_id: int
+    title: str
+    url: str
+    location: str | None
+    when: str | None = None
+    why: str | None = None
+
+
+@dataclass
+class Plan:
+    ok: bool
+    stops: list[Stop] = field(default_factory=list)
+    summary: str | None = None
+    error: str | None = None
+    dropped: list[int] = field(default_factory=list)
+    cluster_size: int = 0
+
+    def render(self) -> str:
+        """The message the user sees.
+
+        Venue names come from stored data, never from the model's text.
+        """
+        if not self.ok:
+            return f"Could not build a plan: {self.error}"
+        lines = []
+        if self.summary:
+            lines += [self.summary, ""]
+        for index, stop in enumerate(self.stops, 1):
+            when = f"{stop.when} - " if stop.when else ""
+            lines.append(f"{index}. {when}{stop.title}")
+            if stop.location:
+                lines.append(f"   {stop.location}")
+            if stop.why:
+                lines.append(f"   {stop.why}")
+            lines.append(f"   {stop.url}")
+        return "\n".join(lines)
+
+
+def urgency_tier(event_end: str | None, is_evergreen: bool, today: date) -> str | None:
+    """Tier for one link, or None when it has already expired.
+
+    Computed here rather than in the prompt: the model is inconsistent about
+    date arithmetic and the result is hard to debug after the fact.
+    """
+    if not event_end:
+        return TIER_FLEXIBLE if is_evergreen else TIER_FLEXIBLE
+    try:
+        ends = date.fromisoformat(event_end)
+    except (TypeError, ValueError):
+        return TIER_FLEXIBLE
+    days = (ends - today).days
+    if days < 0:
+        return None
+    if days <= URGENT_DAYS:
+        return TIER_URGENT
+    if days <= SOON_DAYS:
+        return TIER_SOON
+    return TIER_FLEXIBLE
+
+
+def select_candidates(rows, today: date | None = None) -> list[Candidate]:
+    """Links that could appear in a plan today.
+
+    Excluded: anything done, anything expired, anything without coordinates
+    (it cannot be placed in a cluster), and day trips, which are kept and
+    browsable but are not an MRT stop away.
+    """
+    today = today or date.today()
+    candidates: list[Candidate] = []
+    for row in rows:
+        data = dict(row)
+        if data.get("done"):
+            continue
+        if data.get("lat") is None or data.get("lng") is None:
+            continue
+        tier = urgency_tier(
+            data.get("event_end"), bool(data.get("is_evergreen")), today
+        )
+        if tier is None:
+            logger.debug("id=%s expired on %s, excluded", data["id"], data.get("event_end"))
+            continue
+        candidates.append(
+            Candidate(
+                id=int(data["id"]),
+                title=(data.get("title") or data.get("url") or "").strip(),
+                url=data.get("url") or "",
+                category=data.get("category"),
+                subcategory=data.get("subcategory"),
+                tags=data.get("tags"),
+                location=data.get("location"),
+                lat=float(data["lat"]),
+                lng=float(data["lng"]),
+                tier=tier,
+                event_end=data.get("event_end"),
+                rating=data.get("rating"),
+            )
+        )
+    logger.info("%d candidate(s) after filtering", len(candidates))
+    return candidates
+
+
+def cluster_by_proximity(
+    candidates: list[Candidate], radius_metres: int = CLUSTER_RADIUS_METRES
+) -> list[list[Candidate]]:
+    """Single-linkage grouping: two stops join a cluster if either is within
+    `radius_metres` of any member.
+
+    Single linkage suits an itinerary - a chain of nearby stops is walkable
+    even when its ends are further apart than the radius - and at this data
+    size the quadratic comparison is free.
+    """
+    unassigned = list(candidates)
+    clusters: list[list[Candidate]] = []
+
+    while unassigned:
+        seed = unassigned.pop(0)
+        group = [seed]
+        changed = True
+        while changed:
+            changed = False
+            for other in list(unassigned):
+                if any(
+                    distance_metres((m.lat, m.lng), (other.lat, other.lng)) <= radius_metres
+                    for m in group
+                ):
+                    group.append(other)
+                    unassigned.remove(other)
+                    changed = True
+        clusters.append(group)
+
+    clusters.sort(key=score_cluster, reverse=True)
+    logger.info(
+        "clustered into %s", [f"{len(c)} stop(s)" for c in clusters] or "nothing"
+    )
+    return clusters
+
+
+def score_cluster(cluster: list[Candidate]) -> float:
+    """How promising a cluster is as the basis for one outing.
+
+    Urgency dominates, because an expiring link is the only thing here with a
+    deadline. Variety and past ratings break ties: a food stop plus an activity
+    is a day out, whereas three cafes within one block is one errand.
+    """
+    score = sum(_TIER_WEIGHT.get(c.tier, 0) for c in cluster)
+    categories = {c.category for c in cluster if c.category and c.category != "other"}
+    score += 15 * max(0, len(categories) - 1)
+    score += min(len(cluster), MAX_STOPS) * 3
+    rated = [c.rating for c in cluster if c.rating]
+    if rated:
+        score += sum(rated) / len(rated)
+    return score
+
+
+def _shortlist(cluster: list[Candidate]) -> list[Candidate]:
+    """Trim a cluster to what one day can hold, urgent items first."""
+    ordered = sorted(
+        cluster, key=lambda c: (-_TIER_WEIGHT.get(c.tier, 0), -(c.rating or 0), c.id)
+    )
+    return ordered[:MAX_STOPS]
+
+
+PROMPT_TEMPLATE = """\
+You are arranging a Saturday outing for a couple in Singapore.
+
+Today is {today}.
+
+Below is a shortlist of places they have already saved. The shortlist has
+ALREADY been checked: every place is real, currently valid, and close enough to
+the others to visit in one day. Distances and deadlines were computed before
+you were asked.
+
+Your job is ONLY to arrange them: choose a sensible order and rough times, and
+explain briefly why the day works.
+
+STRICT RULES:
+- Use ONLY the places listed below, referenced by their exact "id".
+- Do NOT introduce any other venue, restaurant, cafe, attraction or landmark,
+  not even as a suggestion or an aside. If the day feels thin, use fewer stops.
+- Do not invent addresses, opening hours, prices or menu items.
+- Items marked urgent end soon; build the day around them.
+
+Places:
+{places}
+
+Return ONLY a JSON object:
+{{
+  "summary": "one or two sentences about the day as a whole",
+  "stops": [
+    {{"id": <id from the list>, "when": "e.g. 11:00am", "why": "one short sentence"}}
+  ]
+}}
+Order "stops" in visiting order. Include between 1 and {max_stops} stops.
+"""
+
+
+def _describe_place(candidate: Candidate) -> str:
+    bits = [f'  - id {candidate.id}: "{candidate.title}"']
+    if candidate.category:
+        kind = candidate.category
+        if candidate.subcategory and candidate.subcategory != "other":
+            kind += f"/{candidate.subcategory}"
+        bits.append(f"    type: {kind}")
+    if candidate.location:
+        bits.append(f"    location: {candidate.location}")
+    if candidate.tags:
+        bits.append(f"    tags: {candidate.tags}")
+    bits.append(f"    urgency: {candidate.tier}")
+    if candidate.event_end:
+        bits.append(f"    ends: {candidate.event_end}")
+    if candidate.rating:
+        bits.append(f"    they rated a previous visit {candidate.rating}/10")
+    return "\n".join(bits)
+
+
+# Capitalised words that are not venue names, so a phrase made only of these
+# is not a smuggled place. Without this, "Saturday Morning" would read as a
+# proper noun and cost a perfectly good sentence.
+_GENERIC_CAPS = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "singapore", "mrt", "morning", "afternoon", "evening", "night", "lunch",
+    "dinner", "brunch", "breakfast", "coffee", "dessert", "start", "then",
+    "next", "finally", "first", "after", "afterwards", "end", "the", "a", "of",
+    "and", "at", "in", "on", "for", "with", "you", "your", "it", "this", "that",
+    "day", "date", "walk", "head", "stop", "grab", "wrap", "close", "begin",
+}
+
+_PROPER_NOUN = re.compile(r"\b(?:[A-Z][\w'&-]*)(?:\s+(?:[A-Z][\w'&-]*|of|and|the))+\b")
+
+
+def _scrub_prose(text: str | None, allowed: str) -> str | None:
+    """Drop model prose that names a place we did not supply.
+
+    Enforcing grounding on stop ids alone is not enough: a response can carry a
+    perfectly valid set of ids and still write "start at Marina Bay Sands" in
+    its summary, which reaches the user as a real instruction. Any multi-word
+    proper noun that does not appear in the shortlist's own titles or addresses
+    costs the sentence - the plan still renders, with its grounded stops, minus
+    the invented detail.
+    """
+    if not text:
+        return None
+    haystack = allowed.lower()
+    for match in _PROPER_NOUN.findall(text):
+        words = [w for w in re.split(r"\s+", match) if w]
+        if all(w.lower() in _GENERIC_CAPS for w in words):
+            continue
+        if match.lower() in haystack:
+            continue
+        logger.warning(
+            "dropping ungrounded prose: %r mentions %r, which is not in the shortlist",
+            text[:80],
+            match,
+        )
+        return None
+    return text
+
+
+def _extract_json(raw: str) -> dict | None:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            payload = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _call_model(prompt: str, api_key: str, model_name: str) -> tuple[str | None, str | None]:
+    """(raw_text, error). Never raises."""
+    try:
+        client = genai.Client(api_key=api_key)
+        config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.4,
+            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                disable=True
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("could not create Gemini client")
+        return None, f"{type(exc).__name__}: {exc}"
+
+    for attempt in range(TRANSIENT_RETRIES + 1):
+        try:
+            response = client.models.generate_content(
+                model=model_name, contents=prompt, config=config
+            )
+            return (response.text or "").strip(), None
+        except (genai_errors.ClientError, genai_errors.ServerError) as exc:
+            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            retryable = isinstance(exc, genai_errors.ServerError) or status == 429
+            if not retryable or attempt >= TRANSIENT_RETRIES:
+                return None, f"{type(exc).__name__}: {exc}"
+            logger.warning("planner call transient failure (%s), retrying", status)
+            time.sleep(RETRY_BACKOFF_SECONDS)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("planner call failed")
+            return None, f"{type(exc).__name__}: {exc}"
+    return None, "no response from model"
+
+
+def plan_date(
+    rows,
+    api_key: str,
+    model_name: str,
+    today: date | None = None,
+    radius_metres: int = CLUSTER_RADIUS_METRES,
+) -> Plan:
+    """The single seam for the planning LLM call. Never raises."""
+    today = today or date.today()
+
+    candidates = select_candidates(rows, today)
+    if not candidates:
+        return Plan(ok=False, error="no candidate links with coordinates")
+
+    clusters = cluster_by_proximity(candidates, radius_metres)
+    best = clusters[0]
+    shortlist = _shortlist(best)
+    logger.info(
+        "planning around %d stop(s): %s",
+        len(shortlist),
+        [(c.id, c.title[:24], c.tier) for c in shortlist],
+    )
+
+    if not api_key:
+        return Plan(ok=False, error="GEMINI_API_KEY is not configured")
+
+    prompt = PROMPT_TEMPLATE.format(
+        today=today.isoformat(),
+        places="\n".join(_describe_place(c) for c in shortlist),
+        max_stops=MAX_STOPS,
+    )
+    raw, error = _call_model(prompt, api_key, model_name)
+    if raw is None:
+        return Plan(ok=False, error=error or "model call failed")
+
+    payload = _extract_json(raw)
+    if payload is None:
+        logger.warning("planner response was not JSON: %r", raw[:200])
+        return Plan(ok=False, error="model did not return JSON")
+
+    # Grounding enforcement: only ids we supplied may appear, and the names the
+    # user sees are taken from our own records rather than from the response.
+    by_id = {c.id: c for c in shortlist}
+    # Everything the model is allowed to name, drawn from our own records.
+    allowed_text = " | ".join(
+        " ".join(filter(None, (c.title, c.location, c.tags))) for c in shortlist
+    ).lower()
+    stops: list[Stop] = []
+    dropped: list[int] = []
+    for entry in payload.get("stops") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            link_id = int(entry.get("id"))
+        except (TypeError, ValueError):
+            continue
+        candidate = by_id.get(link_id)
+        if candidate is None:
+            logger.warning("model referenced unknown link id %s; dropping", link_id)
+            dropped.append(link_id)
+            continue
+        if any(s.link_id == link_id for s in stops):
+            continue
+        stops.append(
+            Stop(
+                link_id=candidate.id,
+                title=candidate.title,
+                url=candidate.url,
+                location=candidate.location,
+                when=(str(entry.get("when")).strip() or None) if entry.get("when") else None,
+                why=_scrub_prose(
+                    str(entry.get("why")).strip() if entry.get("why") else None,
+                    allowed_text,
+                ),
+            )
+        )
+
+    if not stops:
+        return Plan(ok=False, error="model returned no usable stops", dropped=dropped)
+
+    summary = payload.get("summary")
+    summary = _scrub_prose(str(summary).strip() if summary else None, allowed_text)
+    logger.info(
+        "plan built: %d stop(s), %d dropped for grounding", len(stops), len(dropped)
+    )
+    return Plan(
+        ok=True,
+        stops=stops,
+        summary=summary,
+        dropped=dropped,
+        cluster_size=len(best),
+    )

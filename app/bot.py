@@ -32,6 +32,7 @@ from app.auth import allowed_chat_filter
 from app.config import POLLING, PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.database import count_links, init_db
 from app.handlers.link_handler import LINK_PATTERN, handle_links
+from app.handlers.plan_handler import plan_command
 from app.handlers.reminder_handler import (
     add_date_command,
     delete_date_command,
@@ -225,6 +226,10 @@ def build_application(settings: Settings) -> Application:
             handle_links,
         )
     )
+    application.add_handler(
+        CommandHandler("plan", plan_command, filters=only_our_group)
+    )
+
     # Date commands are allowlisted like everything else that touches data.
     application.add_handler(
         CommandHandler("adddate", add_date_command, filters=only_our_group)
