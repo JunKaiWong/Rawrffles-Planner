@@ -10,7 +10,7 @@ can be traced back to a specific update in the log.
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.db.engine import connect, describe, is_postgres
@@ -549,6 +549,51 @@ def links_for_regeocode(db_path: str | Path) -> list:
         ).fetchall()
     logger.info("%d link(s) selected for forced re-geocoding", len(rows))
     return rows
+
+
+# Long enough to cover any retry Telegram will attempt, short enough that the
+# table stays small. Telegram gives up well inside this.
+PROCESSED_UPDATE_RETENTION_DAYS = 7
+
+
+def claim_update(db_path: str | Path, update_id: int) -> bool:
+    """Claim a Telegram update, returning True if this caller got it first.
+
+    The insert is the lock. Checking first and inserting second would leave a
+    window in which a cold-start delivery and its retry both pass the check -
+    which is precisely the case this exists to stop - so the claim is one
+    statement, and losing the race is reported by it inserting nothing.
+
+    ON CONFLICT DO NOTHING ... RETURNING works on both engines: Postgres has
+    had it for years, SQLite since 3.24 (and RETURNING since 3.35).
+    """
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "INSERT INTO processed_updates (update_id, seen_at) VALUES (?, ?) "
+            "ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
+            (int(update_id), utc_now_iso()),
+        ).fetchone()
+    claimed = row is not None
+    if not claimed:
+        logger.info("update %s already processed; skipping", update_id)
+    return claimed
+
+
+def prune_processed_updates(
+    db_path: str | Path, keep_days: int = PROCESSED_UPDATE_RETENTION_DAYS
+) -> int:
+    """Drop claims older than the window Telegram could still retry within."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat(
+        timespec="seconds"
+    )
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM processed_updates WHERE seen_at < ?", (cutoff,)
+        )
+        removed = cursor.rowcount or 0
+    if removed:
+        logger.info("pruned %d processed-update record(s)", removed)
+    return removed
 
 
 def get_all_settings(db_path: str | Path) -> list:

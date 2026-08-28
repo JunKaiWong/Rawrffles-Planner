@@ -47,6 +47,7 @@ from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.engine import describe
 from app.db.database import (
     add_date,
+    claim_update,
     delete_date,
     get_date,
     get_link,
@@ -56,6 +57,7 @@ from app.db.database import (
     list_calendar_notes,
     list_dates,
     list_links,
+    prune_processed_updates,
     save_calendar_note,
     save_plan,
     set_setting,
@@ -397,6 +399,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # single web service can actually run.
         app.state.telegram_app = None
         if settings.transport == WEBHOOK:
+            try:
+                prune_processed_updates(settings.db_path)
+            except Exception:
+                logger.exception("could not prune processed updates")
             from app.bot import build_application
 
             telegram_app = build_application(settings)
@@ -499,12 +505,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         update = Update.de_json(payload, telegram_app.bot)
-        # Telegram retries on a non-200, so failures are logged and swallowed
-        # rather than causing the same bad update to be redelivered forever.
+        update_id = getattr(update, "update_id", None)
+
+        # Telegram redelivers an update it did not get a prompt 200 for, and on
+        # a host that sleeps the first delivery routinely completes *after* the
+        # retry was sent - so both ran and one message was saved twice. The id
+        # is claimed before any work: whoever loses the race acknowledges and
+        # stops, rather than repeating it.
+        if update_id is not None:
+            try:
+                claimed = await asyncio.to_thread(
+                    claim_update, settings.db_path, update_id
+                )
+            except Exception:
+                # If the claim itself fails, process rather than drop: a
+                # duplicate reply is a smaller harm than a lost message.
+                logger.exception("could not claim update %s; processing anyway", update_id)
+                claimed = True
+            if not claimed:
+                return {"ok": True, "skipped": "duplicate"}
+
         try:
             await telegram_app.process_update(update)
         except Exception:
-            logger.exception("failed to process update %s", getattr(update, "update_id", "?"))
+            # A 200 is still returned: the update is claimed, so retrying it
+            # would only be skipped, and a non-200 would have Telegram redeliver
+            # the same bad update indefinitely.
+            logger.exception("failed to process update %s", update_id)
         return {"ok": True}
 
     # Serve the Mini App from the same origin as the API so browser requests

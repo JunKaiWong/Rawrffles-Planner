@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TEXT NOT NULL
 );
 
+-- Webhook updates already handled. Telegram redelivers when it does not get a
+-- prompt 200, and a slow cold start makes that routine, so the id is claimed
+-- before the update is processed.
+CREATE TABLE IF NOT EXISTS processed_updates (
+    update_id INTEGER PRIMARY KEY,
+    seen_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     week_of    TEXT NOT NULL,
