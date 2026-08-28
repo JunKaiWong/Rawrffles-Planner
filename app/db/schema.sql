@@ -60,8 +60,9 @@ CREATE TABLE IF NOT EXISTS availability (
     day         TEXT    NOT NULL,
     slot        TEXT    NOT NULL,
     available   INTEGER NOT NULL DEFAULT 0,
-    note        TEXT,
-    author_name TEXT
+    note          TEXT,
+    author_name   TEXT,
+    reminder_days TEXT
 );
 
 CREATE TABLE IF NOT EXISTS plans (

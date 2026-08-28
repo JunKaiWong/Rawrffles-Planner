@@ -586,12 +586,24 @@ CALENDAR_SLOT = "day"
 
 
 def _migrate_availability(conn) -> None:
-    """Add the calendar columns to an older SQLite database."""
+    """Add the calendar and per-entry reminder columns to an older SQLite file."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(availability)")}
-    for column in ("note", "author_name"):
+    for column in ("note", "author_name", "reminder_days"):
         if column not in existing:
             logger.info("migrating: adding availability.%s (TEXT)", column)
             conn.execute(f"ALTER TABLE availability ADD COLUMN {column} TEXT")
+
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(dates)")}
+    for column in ("recurrence", "reminder_days"):
+        if column not in existing:
+            logger.info("migrating: adding dates.%s (TEXT)", column)
+            conn.execute(f"ALTER TABLE dates ADD COLUMN {column} TEXT")
+    # A boolean cannot express a monthsary, so recurring is backfilled into the
+    # richer column rather than being read from directly.
+    conn.execute(
+        "UPDATE dates SET recurrence = CASE WHEN recurring THEN 'yearly' ELSE 'once' END "
+        "WHERE recurrence IS NULL"
+    )
 
 
 def list_calendar_notes(db_path: str | Path, start: str, end: str) -> list:
@@ -602,7 +614,8 @@ def list_calendar_notes(db_path: str | Path, start: str, end: str) -> list:
     """
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, user_id, day, note, author_name FROM availability "
+            "SELECT id, user_id, day, note, author_name, reminder_days "
+            "FROM availability "
             "WHERE day >= ? AND day <= ? AND note IS NOT NULL AND note != '' "
             "ORDER BY day, id",
             (start, end),
@@ -617,6 +630,7 @@ def save_calendar_note(
     day: str,
     note: str,
     author_name: str | None = None,
+    reminder_days: str | None = None,
 ) -> str:
     """Create, update or clear one person's note for one day.
 
@@ -640,36 +654,98 @@ def save_calendar_note(
 
         if existing is None:
             conn.execute(
-                "INSERT INTO availability (user_id, day, slot, available, note, author_name) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, day, CALENDAR_SLOT, False, note, author_name),
+                "INSERT INTO availability "
+                "(user_id, day, slot, available, note, author_name, reminder_days) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, day, CALENDAR_SLOT, False, note, author_name, reminder_days),
             )
             logger.info("added calendar note for user=%s day=%s", user_id, day)
             return "created"
 
         conn.execute(
-            "UPDATE availability SET note = ?, author_name = COALESCE(?, author_name) "
+            "UPDATE availability SET note = ?, "
+            "author_name = COALESCE(?, author_name), reminder_days = ? "
             "WHERE id = ?",
-            (note, author_name, dict(existing)["id"]),
+            (note, author_name, reminder_days, dict(existing)["id"]),
         )
     logger.info("updated calendar note for user=%s day=%s", user_id, day)
     return "updated"
 
 
 def add_date(
-    db_path: str | Path, label: str, when: str, recurring: bool = False
+    db_path: str | Path,
+    label: str,
+    when: str,
+    recurrence: str = "once",
+    reminder_days: str | None = None,
 ) -> int:
-    """Store an anniversary or one-off date. `when` is ISO YYYY-MM-DD."""
+    """Store a date. `when` is ISO YYYY-MM-DD, recurrence is once|monthly|yearly.
+
+    `recurring` is still written so an older reader of this table sees something
+    sensible, but `recurrence` is what the app reads.
+    """
     with connect(db_path) as conn:
         cursor = conn.execute(
-            "INSERT INTO dates (label, date, recurring) VALUES (?, ?, ?) RETURNING id",
-            (label, when, bool(recurring)),
+            "INSERT INTO dates (label, date, recurring, recurrence, reminder_days) "
+            "VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (label, when, recurrence == "yearly", recurrence, reminder_days),
         )
         date_id = int(dict(cursor.fetchone())["id"])
     logger.info(
-        "stored date id=%s label=%r date=%s recurring=%s", date_id, label, when, recurring
+        "stored date id=%s label=%r date=%s recurrence=%s reminders=%r",
+        date_id, label, when, recurrence, reminder_days,
     )
     return date_id
+
+
+def update_date(
+    db_path: str | Path,
+    date_id: int,
+    label: str | None = None,
+    when: str | None = None,
+    recurrence: str | None = None,
+    reminder_days: str | None = None,
+    set_reminders: bool = False,
+):
+    """Partial update of one date.
+
+    `set_reminders` distinguishes "leave the reminder setting alone" from
+    "store this value", which matters because an empty string is meaningful
+    here: it means never announce.
+    """
+    updates: dict[str, object] = {}
+    if label is not None:
+        updates["label"] = label
+    if when is not None:
+        updates["date"] = when
+    if recurrence is not None:
+        updates["recurrence"] = recurrence
+        updates["recurring"] = recurrence == "yearly"
+    if set_reminders:
+        updates["reminder_days"] = reminder_days
+
+    if not updates:
+        return get_date(db_path, date_id)
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            f"UPDATE dates SET {assignments} WHERE id = ?",
+            (*updates.values(), date_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    logger.info("updated date id=%s fields=%s", date_id, ", ".join(updates))
+    return get_date(db_path, date_id)
+
+
+def get_date(db_path: str | Path, date_id: int):
+    with connect(db_path) as conn:
+        return conn.execute(
+            "SELECT id, label, date, recurring, recurrence, reminder_days "
+            "FROM dates WHERE id = ?",
+            (date_id,),
+        ).fetchone()
 
 
 def list_dates(db_path: str | Path) -> list:
@@ -677,7 +753,8 @@ def list_dates(db_path: str | Path) -> list:
     recurring date's next occurrence cannot be expressed as a stored value."""
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, label, date, recurring FROM dates ORDER BY date"
+            "SELECT id, label, date, recurring, recurrence, reminder_days "
+            "FROM dates ORDER BY date"
         ).fetchall()
     logger.debug("listed %d date(s)", len(rows))
     return rows

@@ -46,6 +46,9 @@ from app.auth import InitDataError, TelegramUser, authorise_user
 from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.engine import describe
 from app.db.database import (
+    add_date,
+    delete_date,
+    get_date,
     get_link,
     get_plan,
     init_db,
@@ -55,11 +58,18 @@ from app.db.database import (
     list_links,
     save_calendar_note,
     save_plan,
+    update_date,
     update_link,
 )
 from app.handlers.plan_handler import next_saturday
 from app.services.planner import CLUSTER_RADIUS_METRES, plan_date
-from app.services.reminders import upcoming
+from app.services.reminders import (
+    AVAILABLE_MILESTONES,
+    format_milestones,
+    parse_milestones,
+    resolve,
+    upcoming,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,17 +154,39 @@ class LinkOut(BaseModel):
 
 
 class DateOut(BaseModel):
-    """An anniversary or one-off date, resolved against today."""
+    """A date resolved against today."""
 
     id: int
     label: str
     # The stored date: for a recurring entry this is the original event.
     date: str
+    recurrence: str  # once | monthly | yearly
     recurring: bool
     # When it next happens, which is what the Mini App counts down to.
     occurs_on: str
     days_until: int
-    years: int | None = None
+    # Anniversary number for yearly dates, months elapsed for monthly ones.
+    count: int | None = None
+    # Which milestones this date announces at, resolved from its own setting or
+    # the default. Editable per date rather than fixed in the source.
+    milestones: list[int] = []
+
+
+class DateIn(BaseModel):
+    """Create or edit a date."""
+
+    label: str = Field(min_length=1, max_length=120)
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    recurrence: str = Field(default="once", pattern=r"^(once|monthly|yearly)$")
+    # Null keeps the default schedule; [] means never announce.
+    milestones: list[int] | None = None
+
+
+class DatePatch(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    recurrence: str | None = Field(default=None, pattern=r"^(once|monthly|yearly)$")
+    milestones: list[int] | None = None
 
 
 class CalendarNoteOut(BaseModel):
@@ -167,6 +199,7 @@ class CalendarNoteOut(BaseModel):
     # Resolved per request: with two people, "mine" and "theirs" is all the
     # attribution the UI needs, and it works before anyone has a stored name.
     is_mine: bool
+    milestones: list[int] = []
 
 
 class CalendarNoteIn(BaseModel):
@@ -175,6 +208,9 @@ class CalendarNoteIn(BaseModel):
         max_length=280,
         description="Free text for the day. An empty note clears the entry.",
     )
+    # Per-entry, like dates: "remind me the day before this one" without
+    # changing anything else.
+    milestones: list[int] | None = None
 
 
 class PlanRequest(BaseModel):
@@ -247,6 +283,43 @@ def _row_to_link(row) -> LinkOut:
     raw_tags = data.get("tags") or ""
     data["tags"] = [tag for tag in (t.strip() for t in raw_tags.split(",")) if tag]
     return LinkOut(**data)
+
+
+def _valid_date(value: str) -> None:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="date must be a real calendar date, YYYY-MM-DD",
+        ) from None
+
+
+def _milestones_for_storage(milestones: list[int] | None) -> str | None:
+    """None keeps the default schedule; [] stores "never announce"."""
+    if milestones is None:
+        return None
+    invalid = [m for m in milestones if m not in AVAILABLE_MILESTONES]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"unsupported milestone(s) {invalid}; choose from {list(AVAILABLE_MILESTONES)}",
+        )
+    return format_milestones(milestones)
+
+
+def _date_out(item) -> "DateOut":
+    return DateOut(
+        id=item.id,
+        label=item.label,
+        date=item.stored_date,
+        recurrence=item.recurrence,
+        recurring=item.recurring,
+        occurs_on=item.occurs_on.isoformat(),
+        days_until=item.days_until,
+        count=item.count,
+        milestones=list(item.milestones),
+    )
 
 
 def current_user(request: Request) -> TelegramUser:
@@ -404,6 +477,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:  # pragma: no cover - only if the directory is missing
         logger.warning("Mini App directory not found at %s", MINIAPP_DIR)
 
+    def _fetch_date_out(date_id: int) -> DateOut:
+        row = get_date(settings.db_path, date_id)
+        item = resolve(row) if row is not None else None
+        if item is None:
+            # A one-off in the past resolves to nothing, but the caller still
+            # needs the row back after saving it.
+            data = dict(row)
+            return DateOut(
+                id=data["id"],
+                label=data["label"],
+                date=data["date"],
+                recurrence=data.get("recurrence") or "once",
+                recurring=bool(data.get("recurring")),
+                occurs_on=data["date"],
+                days_until=-1,
+                milestones=list(parse_milestones(data.get("reminder_days"))),
+            )
+        return _date_out(item)
+
     @app.get(
         "/api/calendar",
         response_model=list[CalendarNoteOut],
@@ -437,6 +529,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 user_id=dict(r)["user_id"],
                 author_name=dict(r).get("author_name"),
                 is_mine=dict(r)["user_id"] == user.id,
+                milestones=list(parse_milestones(dict(r).get("reminder_days"))),
             )
             for r in rows
         ]
@@ -469,6 +562,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             day,
             payload.note,
             user.first_name,
+            _milestones_for_storage(payload.milestones),
         )
         logger.info("calendar %s for %s by user %s", outcome, day, user.id)
         return {"ok": True, "day": day, "outcome": outcome}
@@ -593,21 +687,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         The next occurrence is computed here rather than stored, because a
         recurring date has no single future value to keep in a column.
         """
-        rows = list_dates(settings.db_path)
+        rows = await asyncio.to_thread(list_dates, settings.db_path)
         items = upcoming(rows)
         logger.debug("returning %d upcoming date(s) to user %s", len(items), user.id)
-        return [
-            DateOut(
-                id=item.id,
-                label=item.label,
-                date=item.stored_date,
-                recurring=item.recurring,
-                occurs_on=item.occurs_on.isoformat(),
-                days_until=item.days_until,
-                years=item.years,
+        return [_date_out(item) for item in items]
+
+    @app.post(
+        "/api/dates",
+        response_model=DateOut,
+        tags=["dates"],
+        summary="Add an anniversary, monthsary or one-off date",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def create_date(
+        payload: DateIn,
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> DateOut:
+        _valid_date(payload.date)
+        date_id = await asyncio.to_thread(
+            add_date,
+            settings.db_path,
+            payload.label.strip(),
+            payload.date,
+            payload.recurrence,
+            _milestones_for_storage(payload.milestones),
+        )
+        logger.info("date %s added by user %s", date_id, user.id)
+        return _fetch_date_out(date_id)
+
+    @app.patch(
+        "/api/dates/{date_id}",
+        response_model=DateOut,
+        tags=["dates"],
+        summary="Edit a date, including which milestones it announces at",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def edit_date(
+        date_id: Annotated[int, PathParam(ge=1)],
+        payload: DatePatch,
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> DateOut:
+        if payload.date:
+            _valid_date(payload.date)
+        sent = payload.model_dump(exclude_unset=True)
+        updated = await asyncio.to_thread(
+            update_date,
+            settings.db_path,
+            date_id,
+            payload.label.strip() if payload.label else None,
+            payload.date,
+            payload.recurrence,
+            _milestones_for_storage(payload.milestones),
+            "milestones" in sent,
+        )
+        if updated is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"date {date_id} not found"
             )
-            for item in items
-        ]
+        logger.info("date %s edited by user %s: %s", date_id, user.id, sorted(sent))
+        return _fetch_date_out(date_id)
+
+    @app.delete(
+        "/api/dates/{date_id}",
+        tags=["dates"],
+        summary="Remove a date",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def remove_date(
+        date_id: Annotated[int, PathParam(ge=1)],
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> dict[str, object]:
+        removed = await asyncio.to_thread(delete_date, settings.db_path, date_id)
+        if not removed:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"date {date_id} not found"
+            )
+        logger.info("date %s deleted by user %s", date_id, user.id)
+        return {"ok": True, "id": date_id}
 
     @app.get(
         "/api/links",

@@ -158,6 +158,25 @@ body {
   background: rgba(232, 87, 74, 0.12);
 }
 
+/* Two rows now: the nearest non-monthly date and the nearest monthsary. */
+.date-banner {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.date-banner__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.date-banner__row--today .date-banner__when {
+  color: #e8574a;
+  font-weight: 700;
+}
+
 .date-banner__label {
   font-size: 14px;
   font-weight: 600;
@@ -593,6 +612,86 @@ body {
 .day-theirs__note {
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+/* --- Dates editor --- */
+
+.dates {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.dates__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.dates__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.dates__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dates__empty {
+  margin: 0;
+  color: var(--tg-hint);
+  font-size: 13px;
+}
+
+.date-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--tg-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.date-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.date-row__label {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.date-row__meta {
+  color: var(--tg-hint);
+  font-size: 11px;
+}
+
+.date-row__when {
+  flex-shrink: 0;
+  color: var(--tg-hint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Reused by the milestone and recurrence pickers. */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* --- Filters --- */

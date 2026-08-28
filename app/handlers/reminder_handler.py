@@ -21,25 +21,31 @@ from app.services.reminders import upcoming
 
 logger = logging.getLogger(__name__)
 
-RECURRING_WORDS = {"yearly", "annual", "annually", "recurring", "every-year"}
+YEARLY_WORDS = {"yearly", "annual", "annually", "recurring", "every-year"}
+MONTHLY_WORDS = {"monthly", "monthsary", "every-month"}
 
 USAGE = (
     "Add a date:\n"
     "  /adddate 2026-12-25 Christmas market\n"
     "  /adddate yearly 2020-03-14 Our anniversary\n"
+    "  /adddate monthly 2024-02-14 Monthsary\n"
     "\n"
-    "Dates are YYYY-MM-DD. Add 'yearly' for something that repeats.\n"
-    "See them with /dates, remove one with /deldate <id>."
+    "Dates are YYYY-MM-DD. Add 'yearly' or 'monthly' for one that repeats.\n"
+    "See them with /dates, remove one with /deldate <id>.\n"
+    "Reminder timings are per date and editable in the Mini App."
 )
 
 
-def _parse_add_arguments(args: list[str]) -> tuple[str, str, bool] | None:
-    """Return (iso_date, label, recurring), or None if it cannot be read."""
-    recurring = False
+def _parse_add_arguments(args: list[str]) -> tuple[str, str, str] | None:
+    """Return (iso_date, label, recurrence), or None if it cannot be read."""
+    recurrence = "once"
     remaining = []
     for token in args:
-        if token.lower() in RECURRING_WORDS and not recurring:
-            recurring = True
+        lowered = token.lower()
+        if lowered in YEARLY_WORDS and recurrence == "once":
+            recurrence = "yearly"
+        elif lowered in MONTHLY_WORDS and recurrence == "once":
+            recurrence = "monthly"
         else:
             remaining.append(token)
 
@@ -53,7 +59,7 @@ def _parse_add_arguments(args: list[str]) -> tuple[str, str, bool] | None:
         return None
     if not label:
         return None
-    return parsed.isoformat(), label, recurring
+    return parsed.isoformat(), label, recurrence
 
 
 async def add_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -67,21 +73,24 @@ async def add_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await message.reply_text("I could not read that.\n\n" + USAGE)
         return
 
-    when, label, recurring = parsed
+    when, label, recurrence = parsed
     stored = date.fromisoformat(when)
-    if not recurring and stored < date.today():
+    if recurrence == "once" and stored < date.today():
         # A past one-off would be stored and then never shown, which looks like
         # the command silently failed.
         await message.reply_text(
             f"{when} is in the past, so a one-off there would never come up.\n"
-            "Add 'yearly' if it is an anniversary."
+            "Add 'yearly' or 'monthly' if it repeats."
         )
         return
 
-    date_id = add_date(db_path, label=label, when=when, recurring=recurring)
-    resolved = upcoming([{"id": date_id, "label": label, "date": when, "recurring": recurring}])
+    date_id = add_date(db_path, label=label, when=when, recurrence=recurrence)
+    resolved = upcoming(
+        [{"id": date_id, "label": label, "date": when, "recurrence": recurrence,
+          "reminder_days": None}]
+    )
     when_text = resolved[0].describe_when() if resolved else when
-    kind = "every year" if recurring else "one-off"
+    kind = {"yearly": "every year", "monthly": "every month"}.get(recurrence, "one-off")
     await message.reply_text(f"Saved #{date_id}: {label} ({kind}) - {when_text}.")
 
 

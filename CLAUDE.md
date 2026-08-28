@@ -320,6 +320,25 @@ Lightweight: inline-keyboard slot picking, or a Mini App calendar view.
 - No paid hosting tiers without asking first — free-tier constraints are a
   deliberate design input, not an obstacle to engineer around.
 
+## Settings belong in the Mini App, not in the source
+
+The two people using this app are not developers and will not edit Python to
+change how it behaves. Anything they might reasonably want different — reminder
+milestones, how many stops a plan holds, what counts as "nearby", which
+categories exist — should be **editable in the Mini App**, stored in the
+database, with the constant in the source acting only as the default for a
+value nobody has set yet.
+
+A hardcoded constant is a decision taken away from them. Reach for a settings
+row before reaching for a module-level constant, and when a constant genuinely
+is the right answer — a protocol requirement, a provider's rate limit, a
+security boundary — say so explicitly rather than leaving it to be discovered.
+
+**Flag it at the time.** When implementing something that arguably belongs in
+settings and hardcoding it anyway, say which value, why it is hardcoded, and
+what it would take to expose it. Silent hardcoding is how an app becomes one
+only its author can change.
+
 ## Conventions
 
 - **This file can be wrong.** If a dependency, model name, or API named here is

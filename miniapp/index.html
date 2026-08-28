@@ -34,7 +34,10 @@
     </form>
   </div>
 
-  <!-- Nearest upcoming anniversary or important date. Hidden when none. -->
+  <!--
+    Nearest upcoming dates. Two slots, not one: a monthsary recurs every month
+    and would otherwise permanently hide the yearly anniversary behind it.
+  -->
   <div id="date-banner" class="date-banner" hidden></div>
 
   <header class="header">
@@ -78,7 +81,52 @@
       <span class="dot dot--mine"></span> you
       <span class="dot dot--theirs"></span> them
     </p>
+
+    <div class="dates">
+      <div class="dates__head">
+        <h3 class="dates__title">Anniversaries &amp; dates</h3>
+        <button id="date-add" class="btn btn--ghost btn--sm" type="button">Add</button>
+      </div>
+      <div id="dates-list" class="dates__list"></div>
+    </div>
   </section>
+
+  <!-- Add/edit a date, including which milestones it announces at. -->
+  <div id="date-sheet" class="sheet" hidden>
+    <div class="sheet__backdrop" data-close-date="1"></div>
+    <form class="sheet__panel sheet__panel--tall" id="date-form">
+      <h2 class="sheet__title" id="date-sheet-title">Add a date</h2>
+
+      <label class="field">
+        <span class="field__label">What is it</span>
+        <input id="date-label" class="field__input" type="text" maxlength="120"
+               placeholder="e.g. Our anniversary" />
+      </label>
+
+      <label class="field">
+        <span class="field__label">Date</span>
+        <input id="date-value" class="field__input" type="date" />
+      </label>
+
+      <div class="field">
+        <span class="field__label">Repeats</span>
+        <div class="chip-row" id="date-recurrence"></div>
+      </div>
+
+      <div class="field">
+        <span class="field__label">
+          Remind us <span class="field__hint">tap to choose; none means silent</span>
+        </span>
+        <div class="chip-row" id="date-milestones"></div>
+      </div>
+
+      <div class="sheet__actions">
+        <button type="button" class="btn btn--ghost" id="date-delete" hidden>Delete</button>
+        <button type="button" class="btn btn--ghost" data-close-date="1">Cancel</button>
+        <button type="submit" class="btn btn--primary" id="date-save">Save</button>
+      </div>
+    </form>
+  </div>
 
   <div id="day-sheet" class="sheet" hidden>
     <div class="sheet__backdrop" data-close-day="1"></div>
@@ -90,6 +138,12 @@
         <textarea id="day-note" class="field__input" rows="3" maxlength="280"
                   placeholder="e.g. gym then free after 8"></textarea>
       </label>
+      <div class="field">
+        <span class="field__label">
+          Remind us <span class="field__hint">tap to choose; none means silent</span>
+        </span>
+        <div class="chip-row" id="day-milestones"></div>
+      </div>
       <div class="sheet__actions">
         <button type="button" class="btn btn--ghost" data-close-day="1">Cancel</button>
         <button type="submit" class="btn btn--primary" id="day-save">Save</button>

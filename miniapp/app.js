@@ -150,6 +150,7 @@ const state = {
   calMonth: null, // {year, month} with month 1-12
   calNotes: {},
   calDay: null,
+  editingDate: null,
 };
 
 const els = {
@@ -181,6 +182,18 @@ const els = {
   dayTheirs: document.getElementById("day-theirs"),
   dayNote: document.getElementById("day-note"),
   daySave: document.getElementById("day-save"),
+  dayMilestones: document.getElementById("day-milestones"),
+  datesList: document.getElementById("dates-list"),
+  dateAdd: document.getElementById("date-add"),
+  dateSheet: document.getElementById("date-sheet"),
+  dateForm: document.getElementById("date-form"),
+  dateSheetTitle: document.getElementById("date-sheet-title"),
+  dateLabel: document.getElementById("date-label"),
+  dateValue: document.getElementById("date-value"),
+  dateRecurrence: document.getElementById("date-recurrence"),
+  dateMilestones: document.getElementById("date-milestones"),
+  dateSave: document.getElementById("date-save"),
+  dateDelete: document.getElementById("date-delete"),
   planAllBtn: document.getElementById("plan-all-btn"),
   selectBtn: document.getElementById("select-btn"),
   planFab: document.getElementById("plan-selected-fab"),
@@ -259,9 +272,16 @@ async function api(path, options = {}) {
 
 const fetchLinks = () => api("/links");
 const fetchDates = () => api("/dates");
+const createDate = (body) => api("/dates", { method: "POST", body: JSON.stringify(body) });
+const patchDate = (id, body) =>
+  api(`/dates/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+const removeDate = (id) => api(`/dates/${id}`, { method: "DELETE" });
 const fetchCalendar = (month) => api(`/calendar?month=${encodeURIComponent(month)}`);
-const saveCalendarNote = (day, note) =>
-  api(`/calendar/${day}`, { method: "PUT", body: JSON.stringify({ note }) });
+const saveCalendarNote = (day, note, milestones) =>
+  api(`/calendar/${day}`, {
+    method: "PUT",
+    body: JSON.stringify({ note, milestones: milestones || [] }),
+  });
 const requestPlan = (linkIds) =>
   api("/plan", { method: "POST", body: JSON.stringify({ link_ids: linkIds || null }) });
 const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
@@ -457,22 +477,40 @@ function describeWhen(days) {
   return `in ${days} days`;
 }
 
+function describeCount(entry) {
+  if (!entry.count) return "";
+  return entry.recurrence === "monthly"
+    ? ` · ${entry.count} months`
+    : ` · ${ordinal(entry.count)}`;
+}
+
+function bannerEntries() {
+  // Two slots, not one. A monthsary recurs every month, so it is nearly always
+  // sooner than the anniversary - showing only the nearest date would hide the
+  // yearly one permanently, which is backwards.
+  const monthly = state.dates.find((d) => d.recurrence === "monthly");
+  const other = state.dates.find((d) => d.recurrence !== "monthly");
+  return [other, monthly].filter(Boolean).sort((a, b) => a.days_until - b.days_until);
+}
+
 function renderDateBanner() {
-  // Only the nearest date. A list of every anniversary would push the links -
-  // the reason the app exists - below the fold.
-  const next = state.dates[0];
-  if (!next) {
+  const entries = bannerEntries();
+  if (!entries.length) {
     els.dateBanner.hidden = true;
     els.dateBanner.innerHTML = "";
     return;
   }
-  const years = next.years ? ` · ${ordinal(next.years)}` : "";
   els.dateBanner.hidden = false;
-  els.dateBanner.className = `date-banner${next.days_until === 0 ? " date-banner--today" : ""}`;
-  els.dateBanner.innerHTML = `
-    <span class="date-banner__label">${escapeHtml(next.label)}${escapeHtml(years)}</span>
-    <span class="date-banner__when">${escapeHtml(describeWhen(next.days_until))}</span>
-  `;
+  els.dateBanner.className = "date-banner";
+  els.dateBanner.innerHTML = entries
+    .map(
+      (e) => `
+    <div class="date-banner__row${e.days_until === 0 ? " date-banner__row--today" : ""}">
+      <span class="date-banner__label">${escapeHtml(e.label)}${escapeHtml(describeCount(e))}</span>
+      <span class="date-banner__when">${escapeHtml(describeWhen(e.days_until))}</span>
+    </div>`
+    )
+    .join("");
 }
 
 function render() {
@@ -487,6 +525,7 @@ function render() {
   document.querySelector(".actions").hidden = onCalendar;
   if (onCalendar) {
     setStatus("");
+    renderDatesList();
     return;
   }
 
@@ -594,6 +633,190 @@ els.tabs.forEach((tab) => {
   });
 });
 
+// --- Reminder milestones ----------------------------------------------------
+
+// Offered everywhere a reminder can be set. Mirrors AVAILABLE_MILESTONES on the
+// server, which validates the choice; this list only decides what is offered.
+const MILESTONE_CHOICES = [
+  { days: 30, label: "30d" },
+  { days: 14, label: "14d" },
+  { days: 7, label: "7d" },
+  { days: 3, label: "3d" },
+  { days: 1, label: "1d" },
+  { days: 0, label: "on the day" },
+];
+
+function renderMilestonePicker(container, selected) {
+  const chosen = new Set(selected || []);
+  container.innerHTML = MILESTONE_CHOICES.map(
+    (m) =>
+      `<button type="button" class="chip-btn${chosen.has(m.days) ? " is-active" : ""}"
+        data-milestone="${m.days}">${escapeHtml(m.label)}</button>`
+  ).join("");
+}
+
+function readMilestonePicker(container) {
+  return [...container.querySelectorAll(".chip-btn.is-active")].map((b) =>
+    Number(b.dataset.milestone)
+  );
+}
+
+function wireMilestonePicker(container) {
+  container.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-milestone]");
+    if (!chip) return;
+    chip.classList.toggle("is-active");
+  });
+}
+
+wireMilestonePicker(document.getElementById("date-milestones"));
+wireMilestonePicker(document.getElementById("day-milestones"));
+
+function describeMilestones(days) {
+  if (!days || !days.length) return "no reminders";
+  return days
+    .slice()
+    .sort((a, b) => b - a)
+    .map((d) => (d === 0 ? "on the day" : `${d}d`))
+    .join(", ");
+}
+
+
+// --- Dates editor -----------------------------------------------------------
+
+const RECURRENCE_CHOICES = [
+  { value: "once", label: "Once" },
+  { value: "monthly", label: "Monthly" },
+  { value: "yearly", label: "Yearly" },
+];
+
+function renderRecurrencePicker(selected) {
+  els.dateRecurrence.innerHTML = RECURRENCE_CHOICES.map(
+    (r) =>
+      `<button type="button" class="chip-btn${r.value === selected ? " is-active" : ""}"
+        data-recurrence="${r.value}">${r.label}</button>`
+  ).join("");
+}
+
+els.dateRecurrence.addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-recurrence]");
+  if (!chip) return;
+  // Exactly one, unlike milestones which are a set.
+  els.dateRecurrence.querySelectorAll(".chip-btn").forEach((b) => b.classList.remove("is-active"));
+  chip.classList.add("is-active");
+});
+
+function selectedRecurrence() {
+  const active = els.dateRecurrence.querySelector(".chip-btn.is-active");
+  return active ? active.dataset.recurrence : "once";
+}
+
+function renderDatesList() {
+  if (!state.dates.length) {
+    els.datesList.innerHTML =
+      '<p class="dates__empty">No dates yet. Add an anniversary or a monthsary.</p>';
+    return;
+  }
+  els.datesList.innerHTML = state.dates
+    .map(
+      (d) => `
+    <button type="button" class="date-row" data-date-id="${d.id}">
+      <span class="date-row__main">
+        <span class="date-row__label">${escapeHtml(d.label)}${escapeHtml(describeCount(d))}</span>
+        <span class="date-row__meta">${escapeHtml(d.recurrence)} · ${escapeHtml(
+        describeWhen(d.days_until)
+      )} · ${escapeHtml(describeMilestones(d.milestones))}</span>
+      </span>
+      <span class="date-row__when">${escapeHtml(d.occurs_on)}</span>
+    </button>`
+    )
+    .join("");
+}
+
+function openDateSheet(entry) {
+  state.editingDate = entry || null;
+  els.dateSheetTitle.textContent = entry ? "Edit date" : "Add a date";
+  els.dateLabel.value = entry ? entry.label : "";
+  els.dateValue.value = entry ? entry.date : "";
+  renderRecurrencePicker(entry ? entry.recurrence : "once");
+  renderMilestonePicker(els.dateMilestones, entry ? entry.milestones : [7, 1, 0]);
+  els.dateDelete.hidden = !entry;
+  els.dateSave.disabled = false;
+  els.dateSave.textContent = "Save";
+  els.dateSheet.hidden = false;
+}
+
+function closeDateSheet() {
+  els.dateSheet.hidden = true;
+  state.editingDate = null;
+}
+
+els.dateAdd.addEventListener("click", () => openDateSheet(null));
+els.datesList.addEventListener("click", (event) => {
+  const row = event.target.closest("[data-date-id]");
+  if (!row) return;
+  const entry = state.dates.find((d) => d.id === Number(row.dataset.dateId));
+  if (entry) openDateSheet(entry);
+});
+els.dateSheet.addEventListener("click", (event) => {
+  if (event.target.dataset.closeDate) closeDateSheet();
+});
+
+els.dateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const label = els.dateLabel.value.trim();
+  const when = els.dateValue.value;
+  if (!label || !when) {
+    setStatus("A date needs a name and a day.", "error");
+    return;
+  }
+  const body = {
+    label,
+    date: when,
+    recurrence: selectedRecurrence(),
+    milestones: readMilestonePicker(els.dateMilestones),
+  };
+  els.dateSave.disabled = true;
+  els.dateSave.textContent = "Saving…";
+  try {
+    if (state.editingDate) await patchDate(state.editingDate.id, body);
+    else await createDate(body);
+    closeDateSheet();
+    await reloadDates();
+    tg.HapticFeedback.impactOccurred("light");
+  } catch (err) {
+    els.dateSave.disabled = false;
+    els.dateSave.textContent = "Save";
+    setStatus(err.message, "error");
+  }
+});
+
+els.dateDelete.addEventListener("click", async () => {
+  if (!state.editingDate) return;
+  const entry = state.editingDate;
+  els.dateDelete.disabled = true;
+  try {
+    await removeDate(entry.id);
+    closeDateSheet();
+    await reloadDates();
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    els.dateDelete.disabled = false;
+  }
+});
+
+async function reloadDates() {
+  try {
+    state.dates = await fetchDates();
+  } catch (err) {
+    setStatus(err.message, "error");
+    return;
+  }
+  renderDatesList();
+  renderDateBanner();
+}
+
 // --- Shared calendar --------------------------------------------------------
 
 const MONTH_NAMES = [
@@ -699,6 +922,7 @@ function openDaySheet(day) {
   }
 
   els.dayNote.value = mine ? mine.note : "";
+  renderMilestonePicker(els.dayMilestones, mine ? mine.milestones : []);
   els.daySave.disabled = false;
   els.daySave.textContent = "Save";
   els.daySheet.hidden = false;
@@ -733,7 +957,7 @@ els.dayForm.addEventListener("submit", async (event) => {
   els.daySave.disabled = true;
   els.daySave.textContent = "Saving…";
   try {
-    await saveCalendarNote(day, els.dayNote.value.trim());
+    await saveCalendarNote(day, els.dayNote.value.trim(), readMilestonePicker(els.dayMilestones));
     tg.HapticFeedback.impactOccurred("light");
     closeDaySheet();
     await loadCalendar();

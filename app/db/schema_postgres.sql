@@ -37,20 +37,6 @@ CREATE TABLE IF NOT EXISTS links (
     parsed_at      TEXT
 );
 
--- Columns added after the first deployment. CREATE TABLE IF NOT EXISTS skips an
--- existing table, so new columns need an explicit, idempotent ALTER here - the
--- Postgres equivalent of the SQLite migration in database.py.
-ALTER TABLE links ADD COLUMN IF NOT EXISTS geocoded_at    TEXT;
-ALTER TABLE links ADD COLUMN IF NOT EXISTS geocode_status TEXT;
-
--- The shared calendar reuses `availability`. It was drafted for structured
--- free/busy, but what is actually wanted is "gym then free after 8" - prose,
--- not a rigid schedule - so the note lives in its own column and `available`
--- goes unused. `slot` keeps its NOT NULL and is written as 'day', since a note
--- covers the whole day rather than a time slot.
-ALTER TABLE availability ADD COLUMN IF NOT EXISTS note        TEXT;
-ALTER TABLE availability ADD COLUMN IF NOT EXISTS author_name TEXT;
-
 CREATE INDEX IF NOT EXISTS idx_links_url       ON links (url);
 CREATE INDEX IF NOT EXISTS idx_links_canonical ON links (canonical_url);
 CREATE INDEX IF NOT EXISTS idx_links_done      ON links (done);
@@ -76,3 +62,33 @@ CREATE TABLE IF NOT EXISTS plans (
     summary    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------
+-- Migrations. These run AFTER every CREATE TABLE above, because ALTER on
+-- a table this script has not created yet fails on a fresh database.
+-- ---------------------------------------------------------------------
+
+-- Columns added after the first deployment. CREATE TABLE IF NOT EXISTS skips an
+-- existing table, so new columns need an explicit, idempotent ALTER here - the
+-- Postgres equivalent of the SQLite migration in database.py.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS geocoded_at    TEXT;
+ALTER TABLE links ADD COLUMN IF NOT EXISTS geocode_status TEXT;
+
+-- The shared calendar reuses `availability`. It was drafted for structured
+-- free/busy, but what is actually wanted is "gym then free after 8" - prose,
+-- not a rigid schedule - so the note lives in its own column and `available`
+-- goes unused. `slot` keeps its NOT NULL and is written as 'day', since a note
+-- covers the whole day rather than a time slot.
+ALTER TABLE availability ADD COLUMN IF NOT EXISTS note          TEXT;
+ALTER TABLE availability ADD COLUMN IF NOT EXISTS author_name   TEXT;
+-- Per-entry reminder milestones, so a calendar note can announce on its own
+-- schedule instead of a single hardcoded one.
+ALTER TABLE availability ADD COLUMN IF NOT EXISTS reminder_days TEXT;
+
+-- `recurring` was a boolean, which cannot express a monthsary. `recurrence`
+-- replaces it with once|monthly|yearly; the old column is left in place and
+-- backfilled rather than dropped.
+ALTER TABLE dates ADD COLUMN IF NOT EXISTS recurrence    TEXT;
+ALTER TABLE dates ADD COLUMN IF NOT EXISTS reminder_days TEXT;
+UPDATE dates SET recurrence = CASE WHEN recurring THEN 'yearly' ELSE 'once' END
+ WHERE recurrence IS NULL;
