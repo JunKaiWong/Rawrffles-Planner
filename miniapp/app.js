@@ -151,6 +151,8 @@ const state = {
   calNotes: {},
   calDay: null,
   editingDate: null,
+  includeAll: false,
+  settings: null,
 };
 
 const els = {
@@ -194,6 +196,16 @@ const els = {
   dateMilestones: document.getElementById("date-milestones"),
   dateSave: document.getElementById("date-save"),
   dateDelete: document.getElementById("date-delete"),
+  includeAllBtn: document.getElementById("include-all-btn"),
+  settingsPanel: document.getElementById("settings"),
+  setMaxStops: document.getElementById("set-max-stops"),
+  setRadius: document.getElementById("set-radius"),
+  setRegion: document.getElementById("set-region"),
+  setStopsDefault: document.getElementById("set-stops-default"),
+  setRadiusDefault: document.getElementById("set-radius-default"),
+  setRegionDefault: document.getElementById("set-region-default"),
+  settingsSave: document.getElementById("settings-save"),
+  settingsStatus: document.getElementById("settings-status"),
   planAllBtn: document.getElementById("plan-all-btn"),
   selectBtn: document.getElementById("select-btn"),
   planFab: document.getElementById("plan-selected-fab"),
@@ -282,8 +294,13 @@ const saveCalendarNote = (day, note, milestones) =>
     method: "PUT",
     body: JSON.stringify({ note, milestones: milestones || [] }),
   });
-const requestPlan = (linkIds) =>
-  api("/plan", { method: "POST", body: JSON.stringify({ link_ids: linkIds || null }) });
+const fetchSettings = () => api("/settings");
+const putSettings = (body) => api("/settings", { method: "PUT", body: JSON.stringify(body) });
+const requestPlan = (linkIds, includeAll) =>
+  api("/plan", {
+    method: "POST",
+    body: JSON.stringify({ link_ids: linkIds || null, include_all: !!includeAll }),
+  });
 const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
@@ -519,13 +536,20 @@ function render() {
   // The calendar replaces the list entirely: filters, counts and the plan
   // buttons are all about links and mean nothing here.
   const onCalendar = state.tab === "calendar";
+  const onSettings = state.tab === "settings";
+  const onLinks = !onCalendar && !onSettings;
   els.calendar.hidden = !onCalendar;
-  els.list.hidden = onCalendar;
-  document.querySelector(".filters").hidden = onCalendar;
-  document.querySelector(".actions").hidden = onCalendar;
+  els.settingsPanel.hidden = !onSettings;
+  els.list.hidden = !onLinks;
+  document.querySelector(".filters").hidden = !onLinks;
+  document.querySelector(".actions").hidden = !onLinks;
   if (onCalendar) {
     setStatus("");
     renderDatesList();
+    return;
+  }
+  if (onSettings) {
+    setStatus("");
     return;
   }
 
@@ -624,6 +648,7 @@ els.tabs.forEach((tab) => {
     // Load the month the first time the calendar is opened, not on every
     // visit to another tab.
     if (state.tab === "calendar" && !state.calMonth) loadCalendar();
+    if (state.tab === "settings" && !state.settings) loadSettingsPanel();
     els.tabs.forEach((other) => {
       const active = other === tab;
       other.classList.toggle("is-active", active);
@@ -631,6 +656,47 @@ els.tabs.forEach((tab) => {
     });
     render();
   });
+});
+
+// --- Settings ---------------------------------------------------------------
+
+async function loadSettingsPanel() {
+  try {
+    const s = await fetchSettings();
+    state.settings = s;
+    els.setMaxStops.value = s.max_stops;
+    els.setRadius.value = s.cluster_radius_metres;
+    els.setRegion.value = s.home_region;
+    const d = s.defaults || {};
+    els.setStopsDefault.textContent = `default ${d.max_stops}`;
+    els.setRadiusDefault.textContent = `default ${d.cluster_radius_metres}`;
+    els.setRegionDefault.textContent = `default ${d.home_region}`;
+    els.settingsStatus.textContent = "";
+  } catch (err) {
+    els.settingsStatus.textContent = err.message;
+  }
+}
+
+els.settingsSave.addEventListener("click", async () => {
+  els.settingsSave.disabled = true;
+  els.settingsStatus.textContent = "Saving…";
+  try {
+    const saved = await putSettings({
+      max_stops: Number(els.setMaxStops.value),
+      cluster_radius_metres: Number(els.setRadius.value),
+      home_region: els.setRegion.value.trim(),
+    });
+    state.settings = saved;
+    els.settingsStatus.textContent = "Saved";
+    tg.HapticFeedback.notificationOccurred("success");
+    // The home region decides what counts as a day trip, so the lists are
+    // stale the moment it changes.
+    await load();
+  } catch (err) {
+    els.settingsStatus.textContent = err.message;
+  } finally {
+    els.settingsSave.disabled = false;
+  }
 });
 
 // --- Reminder milestones ----------------------------------------------------
@@ -1004,6 +1070,9 @@ function toggleSelected(id) {
 
 function planHtml(plan) {
   const parts = [];
+  (plan.warnings || []).forEach((w) => {
+    parts.push(`<p class="plan__note plan__note--warn">${escapeHtml(w)}</p>`);
+  });
   if (plan.summary) parts.push(`<p class="plan__summary">${escapeHtml(plan.summary)}</p>`);
 
   // A suggested stop is a real place found nearby, but one they have not
@@ -1076,7 +1145,7 @@ async function buildPlan(linkIds) {
   button.textContent = "Planning…";
   setStatus("Building a plan… this takes a few seconds.", "info");
   try {
-    const plan = await requestPlan(linkIds);
+    const plan = await requestPlan(linkIds, !linkIds && state.includeAll);
     setStatus("");
     openPlanSheet(plan);
     if (state.selecting) setSelecting(false);
@@ -1096,6 +1165,14 @@ async function buildPlan(linkIds) {
 }
 
 els.planAllBtn.addEventListener("click", () => buildPlan(null));
+
+// A per-plan choice, deliberately not persisted: it answers "this time,
+// everything", not "always ignore the limit".
+els.includeAllBtn.addEventListener("click", () => {
+  state.includeAll = !state.includeAll;
+  els.includeAllBtn.classList.toggle("is-active", state.includeAll);
+  els.includeAllBtn.setAttribute("aria-pressed", String(state.includeAll));
+});
 els.selectBtn.addEventListener("click", () => setSelecting(!state.selecting));
 els.planFab.addEventListener("click", () => buildPlan([...state.selected]));
 els.planSheet.addEventListener("click", (event) => {

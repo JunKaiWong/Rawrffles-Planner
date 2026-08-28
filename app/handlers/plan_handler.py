@@ -13,7 +13,7 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from app.db.database import list_links, save_plan
-from app.services.planner import CLUSTER_RADIUS_METRES, plan_date
+from app.services.planner import plan_date
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +40,12 @@ async def plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     rows = await asyncio.to_thread(list_links, db_path)
     plan = await asyncio.to_thread(
-        plan_date,
-        rows,
-        settings.gemini_api_key,
-        settings.gemini_model,
-        None,
-        CLUSTER_RADIUS_METRES,
-        None,
-        settings,
+        lambda: plan_date(
+            rows,
+            settings.gemini_api_key,
+            settings.gemini_model,
+            settings=settings,
+        )
     )
 
     if not plan.ok:

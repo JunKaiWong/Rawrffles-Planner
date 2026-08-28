@@ -63,6 +63,9 @@
     <button class="tab" role="tab" data-tab="calendar" aria-selected="false">
       Calendar
     </button>
+    <button class="tab" role="tab" data-tab="settings" aria-selected="false">
+      Settings
+    </button>
   </nav>
 
   <!-- Shared month view. Hidden unless the Calendar tab is selected. -->
@@ -164,7 +167,50 @@
   <div class="actions">
     <button id="plan-all-btn" class="btn btn--primary btn--sm" type="button">Plan with all</button>
     <button id="select-btn" class="btn btn--ghost btn--sm" type="button">Select</button>
+    <!--
+      Per-plan, not a saved preference: "put everything in this one", which
+      overrides the max-stops setting for this request only.
+    -->
+    <button id="include-all-btn" class="chip-btn" type="button" aria-pressed="false">
+      Every link
+    </button>
   </div>
+
+  <section id="settings" class="settings" hidden>
+    <p class="settings__intro">
+      These change how planning behaves. Saved straight away — no redeploy.
+    </p>
+
+    <label class="field">
+      <span class="field__label">
+        Stops per plan <span class="field__hint" id="set-stops-default"></span>
+      </span>
+      <input id="set-max-stops" class="field__input" type="number" min="1" max="12" />
+    </label>
+
+    <label class="field">
+      <span class="field__label">
+        "Nearby" means, in metres <span class="field__hint" id="set-radius-default"></span>
+      </span>
+      <input id="set-radius" class="field__input" type="number" min="200" max="50000" step="100" />
+    </label>
+
+    <label class="field">
+      <span class="field__label">
+        Home region <span class="field__hint" id="set-region-default"></span>
+      </span>
+      <input id="set-region" class="field__input" type="text" maxlength="60" />
+      <span class="field__note">
+        Anything saved outside this shows under Day trips and is left out of
+        Saturday clustering.
+      </span>
+    </label>
+
+    <div class="settings__actions">
+      <button id="settings-save" class="btn btn--primary" type="button">Save settings</button>
+      <span id="settings-status" class="settings__status"></span>
+    </div>
+  </section>
 
   <main id="list" class="list" aria-live="polite"></main>
 

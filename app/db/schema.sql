@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS availability (
     reminder_days TEXT
 );
 
+-- Values the couple can change from the Mini App. Stored rather than compiled
+-- in, so changing one needs no redeploy; the constants in the source are only
+-- the defaults for a key nobody has set.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS plans (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     week_of    TEXT NOT NULL,

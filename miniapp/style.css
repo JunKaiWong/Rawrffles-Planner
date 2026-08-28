@@ -135,41 +135,73 @@ body {
 
 /* --- Upcoming date banner --- */
 
+/* Each event is its own card rather than rows stacked in one box, so two
+   unrelated dates do not read as a single block. */
 .date-banner {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   margin: 12px 16px 0;
-  padding: 11px 14px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--tg-button);
-  border-radius: 10px;
-  background: var(--tg-secondary-bg);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.date-banner::-webkit-scrollbar {
+  display: none;
 }
 
 .date-banner[hidden] {
   display: none;
 }
 
-/* The day itself earns a stronger treatment than a countdown. */
-.date-banner--today {
+.date-banner__row {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tg-button);
+  border-radius: 11px;
+  background: var(--tg-secondary-bg);
+  /* Entry is staggered per card below; the transform is what the reduced
+     motion rule removes. */
+  animation: banner-in 320ms ease-out both;
+}
+
+.date-banner__row:nth-child(2) {
+  animation-delay: 70ms;
+}
+
+@keyframes banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.date-banner__label {
+  font-size: 13px;
+  font-weight: 620;
+  overflow-wrap: anywhere;
+}
+
+.date-banner__when {
+  color: var(--tg-hint);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+/* The day itself earns a stronger treatment than a countdown: a warm edge and
+   a slow pulse rather than a colour shout. */
+.date-banner__row--today {
   border-left-color: #e8574a;
   background: rgba(232, 87, 74, 0.12);
-}
-
-/* Two rows now: the nearest non-monthly date and the nearest monthsary. */
-.date-banner {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-}
-
-.date-banner__row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
+  animation: banner-in 320ms ease-out both, today-pulse 2.8s ease-in-out 320ms infinite;
 }
 
 .date-banner__row--today .date-banner__when {
@@ -177,21 +209,60 @@ body {
   font-weight: 700;
 }
 
-.date-banner__label {
-  font-size: 14px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
+@keyframes today-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(232, 87, 74, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(232, 87, 74, 0.13);
+  }
 }
 
-.date-banner__when {
-  flex-shrink: 0;
+/* Motion is decoration here; the information is in the text either way. */
+@media (prefers-reduced-motion: reduce) {
+  .date-banner__row,
+  .date-banner__row--today {
+    animation: none;
+  }
+}
+
+/* --- Settings --- */
+
+.settings {
+  padding: 0 16px;
+}
+
+.settings[hidden] {
+  display: none;
+}
+
+.settings__intro {
+  margin: 0 0 16px;
   color: var(--tg-hint);
   font-size: 13px;
-  font-weight: 550;
 }
 
-.date-banner--today .date-banner__when {
-  color: #e8574a;
+.field__note {
+  display: block;
+  margin-top: 5px;
+  color: var(--tg-hint);
+  font-size: 11px;
+}
+
+.settings__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings__status {
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
+.plan__note--warn {
+  background: rgba(232, 87, 74, 0.14);
+  font-weight: 550;
 }
 
 /* --- Header + tabs --- */

@@ -45,7 +45,12 @@ SOON_DAYS = 30
 TIER_URGENT, TIER_SOON, TIER_FLEXIBLE = "urgent", "soon", "flexible"
 _TIER_WEIGHT = {TIER_URGENT: 100, TIER_SOON: 25, TIER_FLEXIBLE: 5}
 
+# Default only. The real value is a setting the couple can change in the Mini
+# App; see app/services/appsettings.py.
 MAX_STOPS = 4
+# Above this, a "day" is really a list. Used to warn rather than to refuse,
+# because an explicit "include everything" is a deliberate choice.
+LONG_PLAN_WARNING_STOPS = 6
 PLAN_TIMEOUT_SECONDS = 90
 TRANSIENT_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 15
@@ -91,6 +96,9 @@ class Stop:
 @dataclass
 class Plan:
     ok: bool
+    # Things the user should know about the plan they asked for, rather than
+    # reasons it failed - an unrealistically long day is still a valid answer.
+    warnings: list[str] = field(default_factory=list)
     stops: list[Stop] = field(default_factory=list)
     summary: str | None = None
     error: str | None = None
@@ -246,12 +254,12 @@ def score_cluster(cluster: list[Candidate]) -> float:
     return score
 
 
-def _shortlist(cluster: list[Candidate]) -> list[Candidate]:
+def _shortlist(cluster: list[Candidate], max_stops: int = MAX_STOPS) -> list[Candidate]:
     """Trim a cluster to what one day can hold, urgent items first."""
     ordered = sorted(
         cluster, key=lambda c: (-_TIER_WEIGHT.get(c.tier, 0), -(c.rating or 0), c.id)
     )
-    return ordered[:MAX_STOPS]
+    return ordered[:max_stops]
 
 
 PROMPT_TEMPLATE = """\
@@ -270,7 +278,7 @@ explain briefly why the day works.
 STRICT RULES:
 - Use ONLY the places listed below, referenced by their exact "id".
 - Do NOT introduce any other venue, restaurant, cafe, attraction or landmark,
-  not even as a suggestion or an aside. If the day feels thin, use fewer stops.
+  not even as a suggestion or an aside.
 - Places marked SUGGESTED are real nearby venues the couple has not been to.
   They may be used, but do not claim they have been there or that they are
   favourites.
@@ -287,7 +295,7 @@ Return ONLY a JSON object:
     {{"id": <id from the list>, "when": "e.g. 11:00am", "why": "one short sentence"}}
   ]
 }}
-Order "stops" in visiting order. Include between 1 and {max_stops} stops.
+Order "stops" in visiting order. {stop_count_rule}
 """
 
 
@@ -441,7 +449,10 @@ def _centroid(candidates: list[Candidate]) -> tuple[float, float]:
 
 
 def find_gap_fillers(
-    shortlist: list[Candidate], settings, radius_metres: int = GAP_SEARCH_RADIUS_METRES
+    shortlist: list[Candidate],
+    settings,
+    radius_metres: int = GAP_SEARCH_RADIUS_METRES,
+    max_stops: int = MAX_STOPS,
 ) -> list[Candidate]:
     """Real venues near the shortlist that fill a missing category.
 
@@ -550,9 +561,10 @@ def plan_date(
     api_key: str,
     model_name: str,
     today: date | None = None,
-    radius_metres: int = CLUSTER_RADIUS_METRES,
+    radius_metres: int | None = None,
     link_ids: list[int] | None = None,
     settings=None,
+    include_all: bool = False,
 ) -> Plan:
     """The single seam for the planning LLM call. Never raises.
 
@@ -561,8 +573,31 @@ def plan_date(
     belong together, and quietly dropping two of them for being 3km apart would
     be the app overruling a deliberate choice. Their spread is measured and
     reported instead.
+
+    `include_all` is a per-plan decision rather than a preference: it says "put
+    everything eligible in this one plan" and overrides the configured stop
+    limit. An unrealistically long result is flagged, not refused - the caller
+    asked for it deliberately.
     """
     today = today or date.today()
+
+    # How many stops, and how wide a cluster, are settings the couple can
+    # change from the Mini App, so they are read rather than compiled in.
+    limit = MAX_STOPS
+    if settings is not None:
+        try:
+            from app.services.appsettings import load as load_app_settings
+
+            configured = load_app_settings(settings.db_path)
+            limit = configured.max_stops
+            if radius_metres is None:
+                radius_metres = configured.cluster_radius_metres
+        except Exception:
+            logger.exception("could not read app settings; using defaults")
+    if radius_metres is None:
+        radius_metres = CLUSTER_RADIUS_METRES
+
+    warnings: list[str] = []
 
     candidates = select_candidates(rows, today)
     if link_ids:
@@ -575,10 +610,10 @@ def plan_date(
                 error="none of the selected links can be planned around",
                 excluded=excluded,
             )
-        shortlist = _shortlist(usable)
+        shortlist = usable if include_all else _shortlist(usable, limit)
         for c in usable:
             if c not in shortlist:
-                excluded[c.id] = f"only {MAX_STOPS} stops fit in one day"
+                excluded[c.id] = f"only {limit} stops fit in one day"
         cluster_size = len(usable)
         logger.info("planning around a selection of %d link(s)", len(shortlist))
     else:
@@ -586,7 +621,14 @@ def plan_date(
             return Plan(ok=False, error="no candidate links with coordinates")
         clusters = cluster_by_proximity(candidates, radius_metres)
         best = clusters[0]
-        shortlist = _shortlist(best)
+        if include_all:
+            # Everything eligible, not just the best cluster - the point of
+            # asking for all of them is to see them all.
+            shortlist = sorted(
+                candidates, key=lambda c: (-_TIER_WEIGHT.get(c.tier, 0), c.id)
+            )
+        else:
+            shortlist = _shortlist(best, limit)
         excluded = {}
         cluster_size = len(best)
         logger.info(
@@ -600,13 +642,13 @@ def plan_date(
     # unvetted suggestions all the way to the output.
     if settings is not None:
         try:
-            fillers = find_gap_fillers(shortlist, settings)
+            fillers = [] if include_all else find_gap_fillers(shortlist, settings, max_stops=limit)
             if fillers:
                 # A full shortlist with a gap in it is the case this feature
                 # exists for - four cafes in a row is not an outing. Make room
                 # by dropping the lowest-priority saved stop, which stays saved
                 # for another day, rather than declining to fill the gap.
-                while len(shortlist) + len(fillers) > MAX_STOPS and len(shortlist) > 1:
+                while len(shortlist) + len(fillers) > limit and len(shortlist) > 1:
                     demoted = shortlist[-1]
                     logger.info(
                         "making room for a gap-filler: holding back #%s (%s)",
@@ -614,7 +656,7 @@ def plan_date(
                         demoted.title[:40],
                     )
                     shortlist = shortlist[:-1]
-                shortlist = shortlist + fillers[: max(0, MAX_STOPS - len(shortlist))]
+                shortlist = shortlist + fillers[: max(0, limit - len(shortlist))]
         except Exception:
             # Discovery is a bonus; a plan built only from saved links is still
             # a plan.
@@ -626,7 +668,14 @@ def plan_date(
     prompt = PROMPT_TEMPLATE.format(
         today=today.isoformat(),
         places="\n".join(_describe_place(c) for c in shortlist),
-        max_stops=MAX_STOPS,
+        stop_count_rule=(
+            # include_all is an explicit "everything, please", so the usual
+            # licence to use fewer stops is withdrawn for that request.
+            f"Include EVERY place listed above - all {len(shortlist)} of them - "
+            "even if that makes for a long day."
+            if include_all
+            else f"Include between 1 and {len(shortlist)} stops."
+        ),
     )
     raw, error = _call_model(prompt, api_key, model_name)
     if raw is None:
@@ -677,11 +726,29 @@ def plan_date(
 
     summary = payload.get("summary")
     summary = _scrub_prose(str(summary).strip() if summary else None, allowed_text)
+    if len(stops) > LONG_PLAN_WARNING_STOPS:
+        warnings.append(
+            f"{len(stops)} stops is a lot for one day - this reads more like a "
+            "shortlist than an itinerary."
+        )
+    if include_all:
+        warnings.append(
+            f"Included every eligible link ({len(shortlist)}), ignoring the "
+            f"{limit}-stop setting."
+        )
+        if len(stops) < len(shortlist):
+            warnings.append(
+                f"{len(shortlist) - len(stops)} of them did not make it into the "
+                "arrangement."
+            )
+
     logger.info(
-        "plan built: %d stop(s), %d dropped for grounding", len(stops), len(dropped)
+        "plan built: %d stop(s), %d dropped for grounding, %d warning(s)",
+        len(stops), len(dropped), len(warnings),
     )
     return Plan(
         ok=True,
+        warnings=warnings,
         stops=stops,
         summary=summary,
         dropped=dropped,

@@ -58,11 +58,13 @@ from app.db.database import (
     list_links,
     save_calendar_note,
     save_plan,
+    set_setting,
     update_date,
     update_link,
 )
 from app.handlers.plan_handler import next_saturday
-from app.services.planner import CLUSTER_RADIUS_METRES, plan_date
+from app.services import appsettings as app_settings
+from app.services.planner import plan_date
 from app.services.reminders import (
     AVAILABLE_MILESTONES,
     format_milestones,
@@ -213,6 +215,22 @@ class CalendarNoteIn(BaseModel):
     milestones: list[int] | None = None
 
 
+class SettingsOut(BaseModel):
+    """Values the couple can change themselves, with the defaults alongside so
+    the UI can show what "unset" would mean."""
+
+    max_stops: int
+    cluster_radius_metres: int
+    home_region: str
+    defaults: dict[str, object] = {}
+
+
+class SettingsIn(BaseModel):
+    max_stops: int | None = Field(default=None, ge=1, le=12)
+    cluster_radius_metres: int | None = Field(default=None, ge=200, le=50_000)
+    home_region: str | None = Field(default=None, min_length=2, max_length=60)
+
+
 class PlanRequest(BaseModel):
     """Which links to plan around.
 
@@ -223,6 +241,12 @@ class PlanRequest(BaseModel):
 
     link_ids: list[int] | None = Field(
         default=None, description="Selected link ids, or null for all eligible links"
+    )
+    # Per-plan, not a preference: "put everything in this one", overriding the
+    # configured stop limit for this request only.
+    include_all: bool = Field(
+        default=False,
+        description="Include every eligible link, ignoring the max-stops setting",
     )
 
 
@@ -249,6 +273,9 @@ class PlanOut(BaseModel):
     # say why rather than appearing to lose them.
     excluded: dict[int, str] = {}
     spread_metres: int = 0
+    # Non-fatal notes about the plan that was produced, e.g. that it is longer
+    # than one day realistically holds.
+    warnings: list[str] = []
 
 
 class LinkUpdate(BaseModel):
@@ -272,14 +299,14 @@ class LinkUpdate(BaseModel):
     )
 
 
-def _row_to_link(row) -> LinkOut:
+def _row_to_link(row, home_region: str | None = None) -> LinkOut:
     data: dict[str, Any] = dict(row)
     # SQLite stores booleans as integers.
     data["done"] = bool(data["done"])
     data["is_evergreen"] = bool(data["is_evergreen"])
     # Derived server-side so the rule lives in one place rather than being
     # re-implemented by every client.
-    data["is_day_trip"] = is_day_trip(data.get("region"))
+    data["is_day_trip"] = is_day_trip(data.get("region"), home_region)
     raw_tags = data.get("tags") or ""
     data["tags"] = [tag for tag in (t.strip() for t in raw_tags.split(",")) if tag]
     return LinkOut(**data)
@@ -497,6 +524,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _date_out(item)
 
     @app.get(
+        "/api/settings",
+        response_model=SettingsOut,
+        tags=["settings"],
+        summary="Values the couple can change themselves",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def read_settings(
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> SettingsOut:
+        current = await asyncio.to_thread(app_settings.load, settings.db_path)
+        return SettingsOut(
+            max_stops=current.max_stops,
+            cluster_radius_metres=current.cluster_radius_metres,
+            home_region=current.home_region,
+            defaults=app_settings.defaults(),
+        )
+
+    @app.put(
+        "/api/settings",
+        response_model=SettingsOut,
+        tags=["settings"],
+        summary="Change a setting without a redeploy",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def write_settings(
+        payload: SettingsIn,
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> SettingsOut:
+        sent = payload.model_dump(exclude_unset=True, exclude_none=True)
+        if not sent:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="nothing to change"
+            )
+        for key, value in sent.items():
+            await asyncio.to_thread(
+                set_setting, settings.db_path, key, str(value).strip()
+            )
+        # So the person who just changed it sees the new value immediately,
+        # rather than up to the cache TTL later.
+        app_settings.invalidate()
+        logger.info("settings changed by user %s: %s", user.id, sorted(sent))
+        current = await asyncio.to_thread(app_settings.load, settings.db_path)
+        return SettingsOut(
+            max_stops=current.max_stops,
+            cluster_radius_metres=current.cluster_radius_metres,
+            home_region=current.home_region,
+            defaults=app_settings.defaults(),
+        )
+
+    @app.get(
         "/api/calendar",
         response_model=list[CalendarNoteOut],
         tags=["calendar"],
@@ -591,14 +668,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         rows = await asyncio.to_thread(list_links, settings.db_path)
         plan = await asyncio.to_thread(
-            plan_date,
-            rows,
-            settings.gemini_api_key,
-            settings.gemini_model,
-            None,
-            CLUSTER_RADIUS_METRES,
-            payload.link_ids,
-            settings,
+            lambda: plan_date(
+                rows,
+                settings.gemini_api_key,
+                settings.gemini_model,
+                link_ids=payload.link_ids,
+                settings=settings,
+                include_all=payload.include_all,
+            )
         )
         if not plan.ok:
             raise HTTPException(
@@ -628,6 +705,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             text=text,
             excluded=plan.excluded,
             spread_metres=plan.spread_metres,
+            warnings=plan.warnings,
         )
 
     @app.post(
@@ -778,8 +856,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Newest first. The Mini App splits these into To visit / Done itself,
         so both are returned together."""
         rows = list_links(settings.db_path)
+        home = app_settings.load(settings.db_path).home_region
         logger.debug("returning %d link(s) to user %s", len(rows), user.id)
-        return [_row_to_link(row) for row in rows]
+        return [_row_to_link(row, home) for row in rows]
 
     @app.patch(
         "/api/links/{link_id}",

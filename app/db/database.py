@@ -48,13 +48,17 @@ _EXPECTED_LINK_COLUMNS = {
 HOME_REGION = "singapore"
 
 
-def is_day_trip(region: str | None) -> bool:
+def is_day_trip(region: str | None, home_region: str | None = None) -> bool:
     """True when a link is known to be outside the home region.
 
     An unknown region is deliberately NOT a day trip: an unparsed link should
     fall through to the normal planner rather than being quietly set aside.
+
+    `home_region` comes from settings when the caller has them; the module
+    constant is only the fallback.
     """
-    return bool(region) and region.strip().lower() != HOME_REGION
+    home = (home_region or HOME_REGION).strip().lower()
+    return bool(region) and region.strip().lower() != home
 
 
 def utc_now_iso() -> str:
@@ -545,6 +549,35 @@ def links_for_regeocode(db_path: str | Path) -> list:
         ).fetchall()
     logger.info("%d link(s) selected for forced re-geocoding", len(rows))
     return rows
+
+
+def get_all_settings(db_path: str | Path) -> list:
+    with connect(db_path) as conn:
+        return conn.execute("SELECT key, value FROM settings").fetchall()
+
+
+def set_setting(db_path: str | Path, key: str, value: str) -> None:
+    """Upsert one setting.
+
+    Written as select-then-write rather than an ON CONFLICT clause because the
+    two engines spell that differently, and this table sees a handful of writes
+    in its lifetime.
+    """
+    with connect(db_path) as conn:
+        existing = conn.execute(
+            "SELECT key FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (key, value, utc_now_iso()),
+            )
+        else:
+            conn.execute(
+                "UPDATE settings SET value = ?, updated_at = ? WHERE key = ?",
+                (value, utc_now_iso(), key),
+            )
+    logger.info("setting %s set to %r", key, value)
 
 
 def save_plan(db_path: str | Path, week_of: str, summary: str) -> int:
