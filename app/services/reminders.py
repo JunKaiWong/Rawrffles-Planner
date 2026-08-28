@@ -240,6 +240,60 @@ def banner_dates(rows, today: date | None = None) -> list[Upcoming]:
     return chosen
 
 
+def occurrences_in_month(rows, year: int, month: int) -> list[dict]:
+    """Every stored date that falls inside one calendar month.
+
+    The Mini App's month view needs "does anything land on the 15th", which is
+    a different question from `upcoming()`'s "when is this next" - a yearly date
+    may have no occurrence in a given month at all, and a monthly one always has
+    exactly one.
+    """
+    last_day = monthrange(year, month)[1]
+    found: list[dict] = []
+
+    for row in rows:
+        data = dict(row)
+        recurrence = (data.get("recurrence") or "").strip().lower()
+        if recurrence not in RECURRENCES:
+            recurrence = YEARLY if data.get("recurring") else ONCE
+        try:
+            original = date.fromisoformat(data["date"])
+        except (TypeError, ValueError, KeyError):
+            continue
+
+        if recurrence == MONTHLY:
+            occurs = date(year, month, min(original.day, last_day))
+        elif recurrence == YEARLY:
+            if original.month != month:
+                continue
+            # 29 February observed on the 28th, as everywhere else here.
+            occurs = date(year, month, min(original.day, last_day))
+        else:
+            if (original.year, original.month) != (year, month):
+                continue
+            occurs = original
+
+        count = None
+        if recurrence == YEARLY and occurs.year > original.year:
+            count = occurs.year - original.year
+        elif recurrence == MONTHLY:
+            months = (occurs.year - original.year) * 12 + (occurs.month - original.month)
+            count = months if months > 0 else None
+
+        found.append(
+            {
+                "id": int(data["id"]),
+                "label": str(data["label"]),
+                "day": occurs.isoformat(),
+                "recurrence": recurrence,
+                "count": count,
+            }
+        )
+
+    found.sort(key=lambda item: (item["day"], item["label"]))
+    return found
+
+
 def due_today(rows, today: date | None = None) -> list[Upcoming]:
     """The dates worth announcing today, each against its own milestones."""
     return [u for u in upcoming(rows, today) if u.days_until in u.milestones]

@@ -765,6 +765,56 @@ body {
   gap: 6px;
 }
 
+/* --- Dates shown inside the calendar --- */
+
+/* A stored date is not a note: different marker, different colour, and no way
+   to edit it from the grid. */
+.cal-cell--event {
+  border-color: rgba(232, 87, 74, 0.45);
+}
+
+.cal-cell__event {
+  color: #e8574a;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.cal-cell__preview--event {
+  color: #e8574a;
+  font-weight: 650;
+}
+
+.day-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.day-events[hidden] {
+  display: none;
+}
+
+.day-event {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 11px;
+  border-left: 3px solid #e8574a;
+  border-radius: 8px;
+  background: rgba(232, 87, 74, 0.1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.day-event__hint {
+  margin-left: auto;
+  color: var(--tg-hint);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 /* --- Filters --- */
 
 .filters {

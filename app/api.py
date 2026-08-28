@@ -68,6 +68,7 @@ from app.services.planner import plan_date
 from app.services.reminders import (
     AVAILABLE_MILESTONES,
     format_milestones,
+    occurrences_in_month,
     parse_milestones,
     resolve,
     upcoming,
@@ -202,6 +203,20 @@ class CalendarNoteOut(BaseModel):
     # attribution the UI needs, and it works before anyone has a stored name.
     is_mine: bool
     milestones: list[int] = []
+
+
+class DateOccurrenceOut(BaseModel):
+    """A stored date falling inside the month being viewed.
+
+    Read-only in the calendar: the Dates section stays the source of truth, so
+    these are shown but never edited from the grid.
+    """
+
+    id: int
+    label: str
+    day: str
+    recurrence: str
+    count: int | None = None
 
 
 class CalendarNoteIn(BaseModel):
@@ -610,6 +625,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             for r in rows
         ]
+
+    @app.get(
+        "/api/dates/in-month",
+        response_model=list[DateOccurrenceOut],
+        tags=["dates"],
+        summary="Anniversaries and monthsaries falling inside one month",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def dates_in_month(
+        user: Annotated[TelegramUser, Depends(current_user)],
+        month: Annotated[
+            str, Query(pattern=r"^\d{4}-\d{2}$", description="Month as YYYY-MM")
+        ],
+    ) -> list[DateOccurrenceOut]:
+        """What the month view marks. Different question from /api/dates, which
+        answers "when is this next" rather than "does it land in this month"."""
+        year, month_number = (int(part) for part in month.split("-"))
+        if not 1 <= month_number <= 12:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="month must be between 01 and 12",
+            )
+        rows = await asyncio.to_thread(list_dates, settings.db_path)
+        found = occurrences_in_month(rows, year, month_number)
+        logger.debug("%d date occurrence(s) in %s for user %s", len(found), month, user.id)
+        return [DateOccurrenceOut(**item) for item in found]
 
     @app.put(
         "/api/calendar/{day}",

@@ -135,6 +135,8 @@
     <div class="sheet__backdrop" data-close-day="1"></div>
     <form class="sheet__panel" id="day-form">
       <h2 class="sheet__title" id="day-title">Day</h2>
+      <!-- Anniversaries land here read-only; the Dates section edits them. -->
+      <div id="day-events" class="day-events" hidden></div>
       <div id="day-theirs" class="day-theirs" hidden></div>
       <label class="field">
         <span class="field__label">Your note <span class="field__hint">leave empty to clear</span></span>
@@ -167,13 +169,6 @@
   <div class="actions">
     <button id="plan-all-btn" class="btn btn--primary btn--sm" type="button">Plan with all</button>
     <button id="select-btn" class="btn btn--ghost btn--sm" type="button">Select</button>
-    <!--
-      Per-plan, not a saved preference: "put everything in this one", which
-      overrides the max-stops setting for this request only.
-    -->
-    <button id="include-all-btn" class="chip-btn" type="button" aria-pressed="false">
-      Every link
-    </button>
   </div>
 
   <section id="settings" class="settings" hidden>

@@ -151,8 +151,8 @@ const state = {
   calNotes: {},
   calDay: null,
   editingDate: null,
-  includeAll: false,
   settings: null,
+  calDates: {},
 };
 
 const els = {
@@ -182,6 +182,7 @@ const els = {
   dayForm: document.getElementById("day-form"),
   dayTitle: document.getElementById("day-title"),
   dayTheirs: document.getElementById("day-theirs"),
+  dayEvents: document.getElementById("day-events"),
   dayNote: document.getElementById("day-note"),
   daySave: document.getElementById("day-save"),
   dayMilestones: document.getElementById("day-milestones"),
@@ -196,7 +197,6 @@ const els = {
   dateMilestones: document.getElementById("date-milestones"),
   dateSave: document.getElementById("date-save"),
   dateDelete: document.getElementById("date-delete"),
-  includeAllBtn: document.getElementById("include-all-btn"),
   settingsPanel: document.getElementById("settings"),
   setMaxStops: document.getElementById("set-max-stops"),
   setRadius: document.getElementById("set-radius"),
@@ -289,6 +289,8 @@ const patchDate = (id, body) =>
   api(`/dates/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 const removeDate = (id) => api(`/dates/${id}`, { method: "DELETE" });
 const fetchCalendar = (month) => api(`/calendar?month=${encodeURIComponent(month)}`);
+const fetchDatesInMonth = (month) =>
+  api(`/dates/in-month?month=${encodeURIComponent(month)}`);
 const saveCalendarNote = (day, note, milestones) =>
   api(`/calendar/${day}`, {
     method: "PUT",
@@ -296,11 +298,10 @@ const saveCalendarNote = (day, note, milestones) =>
   });
 const fetchSettings = () => api("/settings");
 const putSettings = (body) => api("/settings", { method: "PUT", body: JSON.stringify(body) });
-const requestPlan = (linkIds, includeAll) =>
-  api("/plan", {
-    method: "POST",
-    body: JSON.stringify({ link_ids: linkIds || null, include_all: !!includeAll }),
-  });
+// "Plan with all" means every eligible link is considered; the planner then
+// builds the most coherent day from them rather than cramming all of them in.
+const requestPlan = (linkIds) =>
+  api("/plan", { method: "POST", body: JSON.stringify({ link_ids: linkIds || null }) });
 const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
@@ -849,6 +850,7 @@ els.dateForm.addEventListener("submit", async (event) => {
     else await createDate(body);
     closeDateSheet();
     await reloadDates();
+    if (state.calMonth) await loadCalendar();
     tg.HapticFeedback.impactOccurred("light");
   } catch (err) {
     els.dateSave.disabled = false;
@@ -865,6 +867,7 @@ els.dateDelete.addEventListener("click", async () => {
     await removeDate(entry.id);
     closeDateSheet();
     await reloadDates();
+    if (state.calMonth) await loadCalendar();
   } catch (err) {
     setStatus(err.message, "error");
   } finally {
@@ -908,17 +911,27 @@ async function loadCalendar() {
     const now = new Date();
     state.calMonth = { year: now.getFullYear(), month: now.getMonth() + 1 };
   }
+  const key = monthKey(state.calMonth);
   try {
-    const notes = await fetchCalendar(monthKey(state.calMonth));
-    // Grouped by day so a cell can show both people at once.
+    // Anniversaries are shown alongside notes but are not notes: they come
+    // from the Dates section, which stays their only editor.
+    const [notes, dates] = await Promise.all([
+      fetchCalendar(key),
+      fetchDatesInMonth(key).catch(() => []),
+    ]);
     state.calNotes = {};
     notes.forEach((n) => {
       (state.calNotes[n.day] = state.calNotes[n.day] || []).push(n);
+    });
+    state.calDates = {};
+    dates.forEach((d) => {
+      (state.calDates[d.day] = state.calDates[d.day] || []).push(d);
     });
     setStatus("");
   } catch (err) {
     setStatus(err.message, "error");
     state.calNotes = {};
+    state.calDates = {};
   }
   renderCalendar();
 }
@@ -943,19 +956,24 @@ function renderCalendar() {
   for (let d = 1; d <= days; d++) {
     const key = `${year}-${pad(month)}-${pad(d)}`;
     const notes = state.calNotes[key] || [];
+    const dates = state.calDates[key] || [];
     const mine = notes.find((n) => n.is_mine);
     const theirs = notes.find((n) => !n.is_mine);
-    // A dot per author, plus the first note as a hint of what the day holds.
+    // A dot per author, and a heart for a stored date, which is a different
+    // kind of thing from a note someone typed.
     const dots =
       (mine ? '<span class="dot dot--mine"></span>' : "") +
-      (theirs ? '<span class="dot dot--theirs"></span>' : "");
-    const preview = notes.length
+      (theirs ? '<span class="dot dot--theirs"></span>' : "") +
+      (dates.length ? '<span class="cal-cell__event" aria-hidden="true">♥</span>' : "");
+    const preview = dates.length
+      ? `<span class="cal-cell__preview cal-cell__preview--event">${escapeHtml(dates[0].label)}</span>`
+      : notes.length
       ? `<span class="cal-cell__preview">${escapeHtml((mine || theirs).note)}</span>`
       : "";
     cells.push(`
       <button type="button" class="cal-cell${key === todayKey ? " cal-cell--today" : ""}${
       notes.length ? " cal-cell--has" : ""
-    }" data-day="${key}">
+    }${dates.length ? " cal-cell--event" : ""}" data-day="${key}">
         <span class="cal-cell__num">${d}</span>
         <span class="cal-cell__dots">${dots}</span>
         ${preview}
@@ -974,6 +992,16 @@ function openDaySheet(day) {
   els.dayTitle.textContent = parsed.toLocaleDateString(undefined, {
     weekday: "long", day: "numeric", month: "long",
   });
+
+  const dates = state.calDates[day] || [];
+  els.dayEvents.hidden = dates.length === 0;
+  els.dayEvents.innerHTML = dates
+    .map(
+      (d) => `<span class="day-event">♥ ${escapeHtml(d.label)}${
+        d.count ? escapeHtml(d.recurrence === "monthly" ? ` · ${d.count} months` : ` · ${ordinal(d.count)}`) : ""
+      }<span class="day-event__hint">edit in Dates</span></span>`
+    )
+    .join("");
 
   if (theirs) {
     els.dayTheirs.hidden = false;
@@ -1145,7 +1173,7 @@ async function buildPlan(linkIds) {
   button.textContent = "Planning…";
   setStatus("Building a plan… this takes a few seconds.", "info");
   try {
-    const plan = await requestPlan(linkIds, !linkIds && state.includeAll);
+    const plan = await requestPlan(linkIds);
     setStatus("");
     openPlanSheet(plan);
     if (state.selecting) setSelecting(false);
@@ -1166,13 +1194,6 @@ async function buildPlan(linkIds) {
 
 els.planAllBtn.addEventListener("click", () => buildPlan(null));
 
-// A per-plan choice, deliberately not persisted: it answers "this time,
-// everything", not "always ignore the limit".
-els.includeAllBtn.addEventListener("click", () => {
-  state.includeAll = !state.includeAll;
-  els.includeAllBtn.classList.toggle("is-active", state.includeAll);
-  els.includeAllBtn.setAttribute("aria-pressed", String(state.includeAll));
-});
 els.selectBtn.addEventListener("click", () => setSelecting(!state.selecting));
 els.planFab.addEventListener("click", () => buildPlan([...state.selected]));
 els.planSheet.addEventListener("click", (event) => {
