@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS links (
 ALTER TABLE links ADD COLUMN IF NOT EXISTS geocoded_at    TEXT;
 ALTER TABLE links ADD COLUMN IF NOT EXISTS geocode_status TEXT;
 
+-- The shared calendar reuses `availability`. It was drafted for structured
+-- free/busy, but what is actually wanted is "gym then free after 8" - prose,
+-- not a rigid schedule - so the note lives in its own column and `available`
+-- goes unused. `slot` keeps its NOT NULL and is written as 'day', since a note
+-- covers the whole day rather than a time slot.
+ALTER TABLE availability ADD COLUMN IF NOT EXISTS note        TEXT;
+ALTER TABLE availability ADD COLUMN IF NOT EXISTS author_name TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_links_url       ON links (url);
 CREATE INDEX IF NOT EXISTS idx_links_canonical ON links (canonical_url);
 CREATE INDEX IF NOT EXISTS idx_links_done      ON links (done);

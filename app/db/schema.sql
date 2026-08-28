@@ -51,12 +51,17 @@ CREATE TABLE IF NOT EXISTS dates (
     recurring INTEGER NOT NULL DEFAULT 0
 );
 
+-- Also backs the shared calendar. That is prose per day ("gym then free after
+-- 8"), not structured free/busy, so `note` carries the text, `slot` is always
+-- 'day', and `available` is unused.
 CREATE TABLE IF NOT EXISTS availability (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id   INTEGER NOT NULL,
-    day       TEXT    NOT NULL,
-    slot      TEXT    NOT NULL,
-    available INTEGER NOT NULL DEFAULT 0
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    day         TEXT    NOT NULL,
+    slot        TEXT    NOT NULL,
+    available   INTEGER NOT NULL DEFAULT 0,
+    note        TEXT,
+    author_name TEXT
 );
 
 CREATE TABLE IF NOT EXISTS plans (

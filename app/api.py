@@ -25,7 +25,18 @@ from typing import Annotated, Any
 
 from telegram import Bot, Update
 
-from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Request, status
+from calendar import monthrange
+from datetime import date
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Path as PathParam,
+    Query,
+    Request,
+    status,
+)
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
@@ -39,8 +50,10 @@ from app.db.database import (
     get_plan,
     init_db,
     is_day_trip,
+    list_calendar_notes,
     list_dates,
     list_links,
+    save_calendar_note,
     save_plan,
     update_link,
 )
@@ -142,6 +155,26 @@ class DateOut(BaseModel):
     occurs_on: str
     days_until: int
     years: int | None = None
+
+
+class CalendarNoteOut(BaseModel):
+    """One person's note for one day."""
+
+    day: str
+    note: str
+    user_id: int
+    author_name: str | None = None
+    # Resolved per request: with two people, "mine" and "theirs" is all the
+    # attribution the UI needs, and it works before anyone has a stored name.
+    is_mine: bool
+
+
+class CalendarNoteIn(BaseModel):
+    note: str = Field(
+        default="",
+        max_length=280,
+        description="Free text for the day. An empty note clears the entry.",
+    )
 
 
 class PlanRequest(BaseModel):
@@ -370,6 +403,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("serving Mini App from %s at /miniapp", MINIAPP_DIR)
     else:  # pragma: no cover - only if the directory is missing
         logger.warning("Mini App directory not found at %s", MINIAPP_DIR)
+
+    @app.get(
+        "/api/calendar",
+        response_model=list[CalendarNoteOut],
+        tags=["calendar"],
+        summary="Shared calendar notes for a month",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def read_calendar(
+        user: Annotated[TelegramUser, Depends(current_user)],
+        month: Annotated[
+            str, Query(pattern=r"^\d{4}-\d{2}$", description="Month as YYYY-MM")
+        ],
+    ) -> list[CalendarNoteOut]:
+        """Both users' notes. The calendar is shared by design - seeing each
+        other's week is the point."""
+        year, month_number = (int(part) for part in month.split("-"))
+        if not 1 <= month_number <= 12:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="month must be between 01 and 12",
+            )
+        last_day = monthrange(year, month_number)[1]
+        start = f"{year:04d}-{month_number:02d}-01"
+        end = f"{year:04d}-{month_number:02d}-{last_day:02d}"
+
+        rows = await asyncio.to_thread(list_calendar_notes, settings.db_path, start, end)
+        return [
+            CalendarNoteOut(
+                day=dict(r)["day"],
+                note=dict(r)["note"],
+                user_id=dict(r)["user_id"],
+                author_name=dict(r).get("author_name"),
+                is_mine=dict(r)["user_id"] == user.id,
+            )
+            for r in rows
+        ]
+
+    @app.put(
+        "/api/calendar/{day}",
+        tags=["calendar"],
+        summary="Add, change or clear your own note for a day",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def write_calendar(
+        day: Annotated[str, PathParam(pattern=r"^\d{4}-\d{2}-\d{2}$")],
+        payload: CalendarNoteIn,
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> dict[str, object]:
+        """A note is always written against the authenticated caller, so one
+        person cannot edit or clear the other's entry."""
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="day must be a real date, YYYY-MM-DD",
+            ) from None
+
+        outcome = await asyncio.to_thread(
+            save_calendar_note,
+            settings.db_path,
+            user.id,
+            day,
+            payload.note,
+            user.first_name,
+        )
+        logger.info("calendar %s for %s by user %s", outcome, day, user.id)
+        return {"ok": True, "day": day, "outcome": outcome}
 
     @app.post(
         "/api/plan",

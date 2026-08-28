@@ -102,6 +102,7 @@ def init_db(db_path: str | Path) -> None:
     with connect(path) as conn:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate(conn)
+        _migrate_availability(conn)
         tables = [
             row["name"]
             for row in conn.execute(
@@ -577,6 +578,82 @@ def list_plans(db_path: str | Path, limit: int = 10) -> list:
             (limit,),
         ).fetchall()
     return rows
+
+
+# The shared calendar stores prose, not free/busy, so a note covers the whole
+# day and `slot` is a constant rather than a time.
+CALENDAR_SLOT = "day"
+
+
+def _migrate_availability(conn) -> None:
+    """Add the calendar columns to an older SQLite database."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(availability)")}
+    for column in ("note", "author_name"):
+        if column not in existing:
+            logger.info("migrating: adding availability.%s (TEXT)", column)
+            conn.execute(f"ALTER TABLE availability ADD COLUMN {column} TEXT")
+
+
+def list_calendar_notes(db_path: str | Path, start: str, end: str) -> list:
+    """Every note in a date range, from both users.
+
+    Ordered by day then id so a day's entries keep a stable order rather than
+    shuffling between requests.
+    """
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, user_id, day, note, author_name FROM availability "
+            "WHERE day >= ? AND day <= ? AND note IS NOT NULL AND note != '' "
+            "ORDER BY day, id",
+            (start, end),
+        ).fetchall()
+    logger.info("listed %d calendar note(s) between %s and %s", len(rows), start, end)
+    return rows
+
+
+def save_calendar_note(
+    db_path: str | Path,
+    user_id: int,
+    day: str,
+    note: str,
+    author_name: str | None = None,
+) -> str:
+    """Create, update or clear one person's note for one day.
+
+    One note per person per day: writing again replaces it, and writing an
+    empty note removes it, which is what "clear this" means from the UI. A
+    person can only ever touch their own row.
+    """
+    note = (note or "").strip()
+    with connect(db_path) as conn:
+        existing = conn.execute(
+            "SELECT id FROM availability WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        ).fetchone()
+
+        if not note:
+            if existing is None:
+                return "unchanged"
+            conn.execute("DELETE FROM availability WHERE id = ?", (dict(existing)["id"],))
+            logger.info("cleared calendar note for user=%s day=%s", user_id, day)
+            return "cleared"
+
+        if existing is None:
+            conn.execute(
+                "INSERT INTO availability (user_id, day, slot, available, note, author_name) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, day, CALENDAR_SLOT, False, note, author_name),
+            )
+            logger.info("added calendar note for user=%s day=%s", user_id, day)
+            return "created"
+
+        conn.execute(
+            "UPDATE availability SET note = ?, author_name = COALESCE(?, author_name) "
+            "WHERE id = ?",
+            (note, author_name, dict(existing)["id"]),
+        )
+    logger.info("updated calendar note for user=%s day=%s", user_id, day)
+    return "updated"
 
 
 def add_date(

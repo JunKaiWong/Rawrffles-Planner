@@ -57,7 +57,45 @@
     <button class="tab" role="tab" data-tab="done" aria-selected="false">
       Done <span class="tab__count" id="count-done">0</span>
     </button>
+    <button class="tab" role="tab" data-tab="calendar" aria-selected="false">
+      Calendar
+    </button>
   </nav>
+
+  <!-- Shared month view. Hidden unless the Calendar tab is selected. -->
+  <section id="calendar" class="calendar" hidden>
+    <div class="calendar__head">
+      <button id="cal-prev" class="calendar__nav" type="button" aria-label="Previous month">‹</button>
+      <h2 id="cal-month" class="calendar__month">—</h2>
+      <button id="cal-next" class="calendar__nav" type="button" aria-label="Next month">›</button>
+    </div>
+    <div class="calendar__weekdays" aria-hidden="true">
+      <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span>
+      <span>Fri</span><span>Sat</span><span>Sun</span>
+    </div>
+    <div id="cal-grid" class="calendar__grid"></div>
+    <p class="calendar__legend">
+      <span class="dot dot--mine"></span> you
+      <span class="dot dot--theirs"></span> them
+    </p>
+  </section>
+
+  <div id="day-sheet" class="sheet" hidden>
+    <div class="sheet__backdrop" data-close-day="1"></div>
+    <form class="sheet__panel" id="day-form">
+      <h2 class="sheet__title" id="day-title">Day</h2>
+      <div id="day-theirs" class="day-theirs" hidden></div>
+      <label class="field">
+        <span class="field__label">Your note <span class="field__hint">leave empty to clear</span></span>
+        <textarea id="day-note" class="field__input" rows="3" maxlength="280"
+                  placeholder="e.g. gym then free after 8"></textarea>
+      </label>
+      <div class="sheet__actions">
+        <button type="button" class="btn btn--ghost" data-close-day="1">Cancel</button>
+        <button type="submit" class="btn btn--primary" id="day-save">Save</button>
+      </div>
+    </form>
+  </div>
 
   <!--
     Filters operate within the selected tab. Counts are computed from that

@@ -146,6 +146,10 @@ const state = {
   selected: new Set(),
   plan: null,
   planning: false,
+  // Calendar: the month on screen, and its notes keyed by day.
+  calMonth: null, // {year, month} with month 1-12
+  calNotes: {},
+  calDay: null,
 };
 
 const els = {
@@ -166,6 +170,17 @@ const els = {
   note: document.getElementById("note"),
   saveBtn: document.getElementById("save-btn"),
   dateBanner: document.getElementById("date-banner"),
+  calendar: document.getElementById("calendar"),
+  calGrid: document.getElementById("cal-grid"),
+  calMonthLabel: document.getElementById("cal-month"),
+  calPrev: document.getElementById("cal-prev"),
+  calNext: document.getElementById("cal-next"),
+  daySheet: document.getElementById("day-sheet"),
+  dayForm: document.getElementById("day-form"),
+  dayTitle: document.getElementById("day-title"),
+  dayTheirs: document.getElementById("day-theirs"),
+  dayNote: document.getElementById("day-note"),
+  daySave: document.getElementById("day-save"),
   planAllBtn: document.getElementById("plan-all-btn"),
   selectBtn: document.getElementById("select-btn"),
   planFab: document.getElementById("plan-selected-fab"),
@@ -226,6 +241,9 @@ async function api(path, options = {}) {
 
 const fetchLinks = () => api("/links");
 const fetchDates = () => api("/dates");
+const fetchCalendar = (month) => api(`/calendar?month=${encodeURIComponent(month)}`);
+const saveCalendarNote = (day, note) =>
+  api(`/calendar/${day}`, { method: "PUT", body: JSON.stringify({ note }) });
 const requestPlan = (linkIds) =>
   api("/plan", { method: "POST", body: JSON.stringify({ link_ids: linkIds || null }) });
 const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
@@ -441,6 +459,19 @@ function renderDateBanner() {
 
 function render() {
   renderDateBanner();
+
+  // The calendar replaces the list entirely: filters, counts and the plan
+  // buttons are all about links and mean nothing here.
+  const onCalendar = state.tab === "calendar";
+  els.calendar.hidden = !onCalendar;
+  els.list.hidden = onCalendar;
+  document.querySelector(".filters").hidden = onCalendar;
+  document.querySelector(".actions").hidden = onCalendar;
+  if (onCalendar) {
+    setStatus("");
+    return;
+  }
+
   const done = state.links.filter((link) => link.done);
   const outstanding = state.links.filter((link) => !link.done);
   // Day trips are split out of "To visit" so the main list stays the set the
@@ -532,6 +563,10 @@ els.tabs.forEach((tab) => {
     state.category = "all";
     state.subcategory = "all";
     state.tag = null;
+    if (state.selecting) setSelecting(false);
+    // Load the month the first time the calendar is opened, not on every
+    // visit to another tab.
+    if (state.tab === "calendar" && !state.calMonth) loadCalendar();
     els.tabs.forEach((other) => {
       const active = other === tab;
       other.classList.toggle("is-active", active);
@@ -539,6 +574,156 @@ els.tabs.forEach((tab) => {
     });
     render();
   });
+});
+
+// --- Shared calendar --------------------------------------------------------
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+
+function monthKey({ year, month }) {
+  return `${year}-${pad(month)}`;
+}
+
+function shiftMonth({ year, month }, delta) {
+  const m = month - 1 + delta;
+  return { year: year + Math.floor(m / 12), month: ((m % 12) + 12) % 12 + 1 };
+}
+
+async function loadCalendar() {
+  if (!state.calMonth) {
+    const now = new Date();
+    state.calMonth = { year: now.getFullYear(), month: now.getMonth() + 1 };
+  }
+  try {
+    const notes = await fetchCalendar(monthKey(state.calMonth));
+    // Grouped by day so a cell can show both people at once.
+    state.calNotes = {};
+    notes.forEach((n) => {
+      (state.calNotes[n.day] = state.calNotes[n.day] || []).push(n);
+    });
+    setStatus("");
+  } catch (err) {
+    setStatus(err.message, "error");
+    state.calNotes = {};
+  }
+  renderCalendar();
+}
+
+function renderCalendar() {
+  const { year, month } = state.calMonth;
+  els.calMonthLabel.textContent = `${MONTH_NAMES[month - 1]} ${year}`;
+
+  const first = new Date(year, month - 1, 1);
+  // Monday-first, which is how a week is read here.
+  const leading = (first.getDay() + 6) % 7;
+  const days = new Date(year, month, 0).getDate();
+  const todayKey = (() => {
+    const t = new Date();
+    return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  })();
+
+  const cells = [];
+  for (let i = 0; i < leading; i++) {
+    cells.push('<div class="cal-cell cal-cell--empty"></div>');
+  }
+  for (let d = 1; d <= days; d++) {
+    const key = `${year}-${pad(month)}-${pad(d)}`;
+    const notes = state.calNotes[key] || [];
+    const mine = notes.find((n) => n.is_mine);
+    const theirs = notes.find((n) => !n.is_mine);
+    // A dot per author, plus the first note as a hint of what the day holds.
+    const dots =
+      (mine ? '<span class="dot dot--mine"></span>' : "") +
+      (theirs ? '<span class="dot dot--theirs"></span>' : "");
+    const preview = notes.length
+      ? `<span class="cal-cell__preview">${escapeHtml((mine || theirs).note)}</span>`
+      : "";
+    cells.push(`
+      <button type="button" class="cal-cell${key === todayKey ? " cal-cell--today" : ""}${
+      notes.length ? " cal-cell--has" : ""
+    }" data-day="${key}">
+        <span class="cal-cell__num">${d}</span>
+        <span class="cal-cell__dots">${dots}</span>
+        ${preview}
+      </button>`);
+  }
+  els.calGrid.innerHTML = cells.join("");
+}
+
+function openDaySheet(day) {
+  state.calDay = day;
+  const notes = state.calNotes[day] || [];
+  const mine = notes.find((n) => n.is_mine);
+  const theirs = notes.find((n) => !n.is_mine);
+
+  const parsed = new Date(`${day}T00:00:00`);
+  els.dayTitle.textContent = parsed.toLocaleDateString(undefined, {
+    weekday: "long", day: "numeric", month: "long",
+  });
+
+  if (theirs) {
+    els.dayTheirs.hidden = false;
+    els.dayTheirs.innerHTML = `
+      <span class="day-theirs__who"><span class="dot dot--theirs"></span>${escapeHtml(
+        theirs.author_name || "Them"
+      )}</span>
+      <span class="day-theirs__note">${escapeHtml(theirs.note)}</span>`;
+  } else {
+    els.dayTheirs.hidden = true;
+    els.dayTheirs.innerHTML = "";
+  }
+
+  els.dayNote.value = mine ? mine.note : "";
+  els.daySave.disabled = false;
+  els.daySave.textContent = "Save";
+  els.daySheet.hidden = false;
+  els.dayNote.focus();
+}
+
+function closeDaySheet() {
+  els.daySheet.hidden = true;
+  state.calDay = null;
+}
+
+els.calPrev.addEventListener("click", () => {
+  state.calMonth = shiftMonth(state.calMonth, -1);
+  loadCalendar();
+});
+els.calNext.addEventListener("click", () => {
+  state.calMonth = shiftMonth(state.calMonth, 1);
+  loadCalendar();
+});
+els.calGrid.addEventListener("click", (event) => {
+  const cell = event.target.closest(".cal-cell[data-day]");
+  if (cell) openDaySheet(cell.dataset.day);
+});
+els.daySheet.addEventListener("click", (event) => {
+  if (event.target.dataset.closeDay) closeDaySheet();
+});
+
+els.dayForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.calDay) return;
+  const day = state.calDay;
+  els.daySave.disabled = true;
+  els.daySave.textContent = "Saving…";
+  try {
+    await saveCalendarNote(day, els.dayNote.value.trim());
+    tg.HapticFeedback.impactOccurred("light");
+    closeDaySheet();
+    await loadCalendar();
+  } catch (err) {
+    els.daySave.disabled = false;
+    els.daySave.textContent = "Save";
+    setStatus(err.message, "error");
+  }
 });
 
 // --- Planning ---------------------------------------------------------------

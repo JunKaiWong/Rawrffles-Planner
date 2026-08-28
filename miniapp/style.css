@@ -426,6 +426,175 @@ body {
   font-size: 12px;
 }
 
+/* --- Shared calendar --- */
+
+.calendar {
+  padding: 0 16px;
+}
+
+.calendar[hidden] {
+  display: none;
+}
+
+.calendar__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.calendar__month {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.calendar__nav {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--tg-text);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.calendar__weekdays,
+.calendar__grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.calendar__weekdays {
+  margin-bottom: 4px;
+  color: var(--tg-hint);
+  font-size: 11px;
+  text-align: center;
+}
+
+.cal-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  /* Tall enough to take a thumb, and to show a hint of the note. */
+  min-height: 62px;
+  padding: 5px 5px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tg-text);
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.cal-cell--empty {
+  border: 0;
+  cursor: default;
+}
+
+.cal-cell--today {
+  border-color: var(--tg-button);
+}
+
+.cal-cell--has {
+  background: var(--tg-secondary-bg);
+}
+
+.cal-cell__num {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-cell--today .cal-cell__num {
+  color: var(--tg-button);
+}
+
+.cal-cell__dots {
+  display: flex;
+  gap: 3px;
+  min-height: 6px;
+}
+
+.cal-cell__preview {
+  color: var(--tg-hint);
+  font-size: 9px;
+  line-height: 1.2;
+  /* Two lines is enough to recognise an entry without turning the grid into
+     a wall of text. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+/* Two authors, two colours - the same distinction the legend explains. */
+.dot--mine {
+  background: var(--tg-button);
+}
+
+.dot--theirs {
+  background: #17b26a;
+}
+
+.calendar__legend {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 10px 0 0;
+  color: var(--tg-hint);
+  font-size: 11px;
+}
+
+.calendar__legend .dot {
+  margin-left: 6px;
+}
+
+.day-theirs {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-left: 3px solid #17b26a;
+  border-radius: 8px;
+  background: var(--tg-secondary-bg);
+}
+
+.day-theirs[hidden] {
+  display: none;
+}
+
+.day-theirs__who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--tg-hint);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.day-theirs__note {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 /* --- Filters --- */
 
 .filters {
