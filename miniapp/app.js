@@ -579,21 +579,31 @@ function planHtml(plan) {
   const parts = [];
   if (plan.summary) parts.push(`<p class="plan__summary">${escapeHtml(plan.summary)}</p>`);
 
+  // A suggested stop is a real place found nearby, but one they have not
+  // vetted. It is marked at every level - badge, accent, and a line saying so -
+  // because mistaking it for something they saved is the whole risk.
   parts.push(
     plan.stops
-      .map(
-        (stop, i) => `
-      <div class="plan__stop">
-        <span class="plan__index">${i + 1}</span>
+      .map((stop, i) => {
+        const suggested = stop.source && stop.source !== "saved";
+        return `
+      <div class="plan__stop${suggested ? " plan__stop--suggested" : ""}">
+        <span class="plan__index${suggested ? " plan__index--suggested" : ""}">${i + 1}</span>
         <div class="plan__detail">
           ${stop.when ? `<span class="plan__when">${escapeHtml(stop.when)}</span>` : ""}
-          <span class="plan__title">${escapeHtml(stop.title)}</span>
+          <span class="plan__title">
+            ${escapeHtml(stop.title)}${suggested ? '<span class="plan__badge">suggested</span>' : ""}
+          </span>
           ${stop.location ? `<span class="plan__where">${escapeHtml(stop.location)}</span>` : ""}
           ${stop.why ? `<span class="plan__why">${escapeHtml(stop.why)}</span>` : ""}
-          <a class="plan__link" href="${escapeHtml(stop.url)}" target="_blank" rel="noopener noreferrer">Open post</a>
+          ${
+            stop.url
+              ? `<a class="plan__link" href="${escapeHtml(stop.url)}" target="_blank" rel="noopener noreferrer">Open post</a>`
+              : `<span class="plan__origin">Found nearby — not one of your saved links</span>`
+          }
         </div>
-      </div>`
-      )
+      </div>`;
+      })
       .join("")
   );
 

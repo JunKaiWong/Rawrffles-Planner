@@ -14,6 +14,14 @@
 
   --border: rgba(0, 0, 0, 0.08);
   --danger: #c0392b;
+  /* Amber marks things that are set aside rather than wrong: a day trip, or a
+     suggested stop. The text tone flips by theme - the dark amber that reads
+     well on white drops to about 4.4:1 on the dark panel, which is under AA
+     for text this small. */
+  --amber: #f59f0b;
+  /* Deliberately darker than the fill: the fill's own #b97708 only reaches
+     3.7:1 on white, which is under AA for the small text this is used on. */
+  --amber-text: #8a5a06;
   --radius: 14px;
   --gap: 12px;
 }
@@ -29,6 +37,7 @@
 
     --border: rgba(255, 255, 255, 0.1);
     --danger: #ff6b5e;
+    --amber-text: #f0b445;
   }
 }
 
@@ -42,6 +51,7 @@
 
   --border: rgba(255, 255, 255, 0.1);
   --danger: #ff6b5e;
+  --amber-text: #f0b445;
 }
 
 * {
@@ -370,6 +380,43 @@ body {
   font-size: 12px;
 }
 
+/* --- Suggested (discovered) stops --- */
+
+/* Amber rather than the accent blue used for saved stops, and a left edge, so
+   the difference is visible at a glance rather than only on reading. */
+.plan__stop--suggested {
+  margin-left: -10px;
+  padding-left: 10px;
+  border-left: 3px solid var(--amber);
+  background: rgba(245, 159, 11, 0.07);
+}
+
+.plan__index--suggested {
+  background: var(--amber);
+  color: #1b1300;
+}
+
+.plan__badge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(245, 159, 11, 0.22);
+  color: var(--amber-text);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
+.plan__origin {
+  margin-top: 2px;
+  color: var(--amber-text);
+  font-size: 11px;
+  font-style: italic;
+}
+
 .plan__note {
   margin: 12px 0 0;
   padding: 9px 11px;
@@ -548,7 +595,7 @@ body {
 /* Outside the home region - kept, but not clustered into a Saturday plan. */
 .badge--daytrip {
   background: rgba(245, 159, 11, 0.2);
-  color: #b97708;
+  color: var(--amber-text);
 }
 
 .meta__item--dates {
