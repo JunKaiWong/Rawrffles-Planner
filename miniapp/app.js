@@ -211,10 +211,28 @@ async function api(path, options = {}) {
   });
 
   if (response.status === 401) {
-    const hint = isDev
-      ? "Dev token missing, expired, or invalid. Generate a fresh one with:\n" +
-        "python -m scripts.make_init_data"
-      : "Telegram sign-in was rejected. Your account may not be on the allowlist.";
+    // Three different situations reach this branch and they need different
+    // advice. Saying "token invalid" when the page was simply opened outside
+    // Telegram sends someone hunting for a broken token that never existed.
+    let hint;
+    if (!isDev) {
+      hint =
+        "Telegram sign-in was rejected. Your account may not be on the allowlist — " +
+        "send /whoami in the group to check your id.";
+    } else if (!tg.initData) {
+      hint =
+        "This page only works inside Telegram.\n\n" +
+        "Open it from the group (the bot's menu button), where Telegram supplies " +
+        "your identity automatically.\n\n" +
+        "To use it in this browser instead, run:\n" +
+        "  python -m scripts.make_init_data\n" +
+        "and paste the result with Set token above.";
+    } else {
+      hint =
+        "That dev token was rejected — it may have expired (they last 24h), or " +
+        "the account it was signed for is not on the allowlist.\n" +
+        "Generate a fresh one with: python -m scripts.make_init_data";
+    }
     const error = new Error(hint);
     error.unauthorised = true;
     throw error;
