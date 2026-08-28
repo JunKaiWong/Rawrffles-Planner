@@ -554,29 +554,85 @@ def links_for_regeocode(db_path: str | Path) -> list:
 # Long enough to cover any retry Telegram will attempt, short enough that the
 # table stays small. Telegram gives up well inside this.
 PROCESSED_UPDATE_RETENTION_DAYS = 7
+# How many times one update may be handed to the handlers. Bounded because a
+# release-on-failure loop would otherwise repeat for as long as Telegram keeps
+# redelivering.
+MAX_UPDATE_ATTEMPTS = 3
 
 
-def claim_update(db_path: str | Path, update_id: int) -> bool:
-    """Claim a Telegram update, returning True if this caller got it first.
+def claim_update(db_path: str | Path, update_id: int, max_attempts: int = MAX_UPDATE_ATTEMPTS) -> bool:
+    """Claim a Telegram update, returning True if this caller should process it.
 
     The insert is the lock. Checking first and inserting second would leave a
     window in which a cold-start delivery and its retry both pass the check -
     which is precisely the case this exists to stop - so the claim is one
     statement, and losing the race is reported by it inserting nothing.
 
+    A claim released by `release_update` after a mid-handler failure can be
+    taken again, up to `max_attempts`, which is what makes delivery
+    at-least-once. The re-claim is guarded on `failed` in its WHERE clause, so
+    two retries arriving together still yield one winner.
+
     ON CONFLICT DO NOTHING ... RETURNING works on both engines: Postgres has
     had it for years, SQLite since 3.24 (and RETURNING since 3.35).
     """
     with connect(db_path) as conn:
         row = conn.execute(
-            "INSERT INTO processed_updates (update_id, seen_at) VALUES (?, ?) "
+            "INSERT INTO processed_updates (update_id, seen_at, attempts, failed) "
+            "VALUES (?, ?, 1, ?) "
             "ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
-            (int(update_id), utc_now_iso()),
+            (int(update_id), utc_now_iso(), False),
         ).fetchone()
-    claimed = row is not None
-    if not claimed:
-        logger.info("update %s already processed; skipping", update_id)
-    return claimed
+        if row is not None:
+            return True
+
+        # Already claimed. Only a previously failed attempt may be retried, and
+        # only while it has attempts left.
+        retaken = conn.execute(
+            "UPDATE processed_updates SET failed = ?, attempts = attempts + 1, seen_at = ? "
+            "WHERE update_id = ? AND failed = ? AND attempts < ? "
+            "RETURNING attempts",
+            (False, utc_now_iso(), int(update_id), True, int(max_attempts)),
+        ).fetchone()
+
+    if retaken is not None:
+        logger.info(
+            "retrying update %s after an earlier failure (attempt %s)",
+            update_id,
+            dict(retaken)["attempts"],
+        )
+        return True
+
+    logger.info("update %s already handled or out of attempts; skipping", update_id)
+    return False
+
+
+def release_update(db_path: str | Path, update_id: int) -> bool:
+    """Mark a claim as failed so Telegram's retry may take it again.
+
+    Returns whether the update still has attempts left. When it does not, the
+    claim stays in place: an update that fails every time should stop being
+    redelivered rather than repeat for as long as Telegram is willing to try.
+    """
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE processed_updates SET failed = ? WHERE update_id = ?",
+            (True, int(update_id)),
+        )
+        row = conn.execute(
+            "SELECT attempts FROM processed_updates WHERE update_id = ?",
+            (int(update_id),),
+        ).fetchone()
+    attempts = int(dict(row)["attempts"]) if row is not None else MAX_UPDATE_ATTEMPTS
+    retryable = attempts < MAX_UPDATE_ATTEMPTS
+    logger.warning(
+        "released update %s after a failure (attempt %s of %s)%s",
+        update_id,
+        attempts,
+        MAX_UPDATE_ATTEMPTS,
+        "" if retryable else " - no attempts left, it will not be retried",
+    )
+    return retryable
 
 
 def prune_processed_updates(
@@ -670,6 +726,12 @@ def _migrate_availability(conn) -> None:
         if column not in existing:
             logger.info("migrating: adding availability.%s (TEXT)", column)
             conn.execute(f"ALTER TABLE availability ADD COLUMN {column} TEXT")
+
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(processed_updates)")}
+    for column, ddl in (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("failed", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in existing:
+            logger.info("migrating: adding processed_updates.%s", column)
+            conn.execute(f"ALTER TABLE processed_updates ADD COLUMN {column} {ddl}")
 
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(dates)")}
     for column in ("recurrence", "reminder_days"):

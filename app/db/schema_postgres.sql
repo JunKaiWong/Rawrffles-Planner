@@ -67,8 +67,13 @@ CREATE TABLE IF NOT EXISTS settings (
 -- a host that sleeps the first delivery can still complete after the retry has
 -- been sent. Claiming the update_id here makes processing at-most-once.
 CREATE TABLE IF NOT EXISTS processed_updates (
-    update_id BIGINT PRIMARY KEY,
-    seen_at   TEXT NOT NULL
+    update_id BIGINT  PRIMARY KEY,
+    seen_at   TEXT    NOT NULL,
+    -- A claim released after a mid-handler failure so Telegram's retry can
+    -- take it, with a count so a permanently failing update stops rather than
+    -- looping for as long as Telegram keeps trying.
+    attempts  INTEGER NOT NULL DEFAULT 1,
+    failed    BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS plans (
@@ -107,3 +112,8 @@ ALTER TABLE dates ADD COLUMN IF NOT EXISTS recurrence    TEXT;
 ALTER TABLE dates ADD COLUMN IF NOT EXISTS reminder_days TEXT;
 UPDATE dates SET recurrence = CASE WHEN recurring THEN 'yearly' ELSE 'once' END
  WHERE recurrence IS NULL;
+
+-- processed_updates predates the retry counters, so they are added here for a
+-- database created before at-least-once delivery existed.
+ALTER TABLE processed_updates ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE processed_updates ADD COLUMN IF NOT EXISTS failed   BOOLEAN NOT NULL DEFAULT FALSE;

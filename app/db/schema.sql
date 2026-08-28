@@ -79,7 +79,11 @@ CREATE TABLE IF NOT EXISTS settings (
 -- before the update is processed.
 CREATE TABLE IF NOT EXISTS processed_updates (
     update_id INTEGER PRIMARY KEY,
-    seen_at   TEXT NOT NULL
+    seen_at   TEXT    NOT NULL,
+    -- See the Postgres schema: a released claim plus an attempt count, so a
+    -- failing update is retried a few times and then left alone.
+    attempts  INTEGER NOT NULL DEFAULT 1,
+    failed    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS plans (

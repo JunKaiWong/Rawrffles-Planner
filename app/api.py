@@ -58,6 +58,7 @@ from app.db.database import (
     list_dates,
     list_links,
     prune_processed_updates,
+    release_update,
     save_calendar_note,
     save_plan,
     set_setting,
@@ -465,8 +466,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("%s %s by user %s", request.method, path, user.id)
         return await call_next(request)
 
-    @app.get("/health", tags=["meta"], summary="Liveness probe (unauthenticated)")
+    @app.api_route(
+        "/health",
+        methods=["GET", "HEAD"],
+        tags=["meta"],
+        summary="Liveness probe (unauthenticated)",
+    )
     async def health() -> dict[str, str]:
+        """HEAD is answered as well as GET.
+
+        FastAPI's @app.get registers GET alone, so a HEAD probe got a 405 and
+        an uptime monitor read that as downtime. Free monitoring plans often
+        only offer HEAD, and a keep-alive ping is the whole reason this route
+        exists on a host that sleeps. Starlette discards the body for HEAD, so
+        one handler serves both.
+        """
         return {"status": "ok"}
 
     @app.post(
@@ -528,10 +542,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             await telegram_app.process_update(update)
         except Exception:
-            # A 200 is still returned: the update is claimed, so retrying it
-            # would only be skipped, and a non-200 would have Telegram redeliver
-            # the same bad update indefinitely.
             logger.exception("failed to process update %s", update_id)
+            # At-least-once: release the claim and answer with a 5xx so
+            # Telegram redelivers, rather than losing the message. A retry only
+            # gets through because the claim was released; a genuine duplicate
+            # still finds the claim held and is skipped.
+            if update_id is not None:
+                try:
+                    retryable = await asyncio.to_thread(
+                        release_update, settings.db_path, update_id
+                    )
+                except Exception:
+                    logger.exception("could not release update %s", update_id)
+                    retryable = False
+                if retryable:
+                    return JSONResponse(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        content={"ok": False, "retry": True},
+                    )
+                # Out of attempts: acknowledge, so an update that fails every
+                # time stops being redelivered.
+                logger.error(
+                    "giving up on update %s after repeated failures", update_id
+                )
         return {"ok": True}
 
     # Serve the Mini App from the same origin as the API so browser requests
