@@ -24,6 +24,14 @@
   --amber-text: #8a5a06;
   --radius: 14px;
   --gap: 12px;
+
+  /* Overwritten from JS with Telegram's reported insets. The env() values are
+     the browser's own device insets: the right answer outside Telegram, and a
+     safe floor inside it if the SDK tells us nothing. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -60,7 +68,10 @@
 
 body {
   margin: 0;
-  padding: 0 0 32px;
+  /* Keeps every scrolling element clear of the notch, the home indicator and
+     Telegram's own header. */
+  padding: var(--safe-top) var(--safe-right) calc(32px + var(--safe-bottom))
+    var(--safe-left);
   background: var(--tg-bg);
   color: var(--tg-text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -290,7 +301,10 @@ body {
   gap: 6px;
   padding: 0 16px 12px;
   position: sticky;
-  top: 0;
+  /* Sticky offsets are measured from the scrollport edge, which body padding
+     does not move - so the tabs need the inset again or they would stick
+     underneath Telegram's header once the list scrolls. */
+  top: var(--safe-top);
   z-index: 5;
   background: var(--tg-bg);
 }
@@ -339,7 +353,7 @@ body {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(18px + env(safe-area-inset-bottom));
+  bottom: calc(18px + var(--safe-bottom));
   z-index: 15;
   padding: 13px 24px;
   border: 0;
@@ -411,7 +425,10 @@ body {
 /* --- Plan sheet --- */
 
 .sheet__panel--tall {
-  max-height: 86vh;
+  /* vh is the whole viewport, including the strip Telegram's header covers, so
+     a tall sheet could still reach up under it. The bottom inset is already
+     handled by the panel's own padding. */
+  max-height: calc(86vh - var(--safe-top));
   overflow-y: auto;
 }
 
@@ -1099,7 +1116,7 @@ body {
   position: relative;
   width: 100%;
   max-width: 520px;
-  padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+  padding: 20px 16px calc(20px + var(--safe-bottom));
   border-radius: 18px 18px 0 0;
   background: var(--tg-bg);
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.25);
@@ -1271,7 +1288,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: calc(16px + var(--safe-top)) calc(16px + var(--safe-right))
+    calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
   background: rgba(0, 0, 0, 0.85);
 }
 

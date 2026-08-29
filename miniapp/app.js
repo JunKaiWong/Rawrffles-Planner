@@ -38,6 +38,14 @@ function createStub(initData) {
     ready() {},
     expand() {},
     close() {},
+    // A plain browser has no Telegram chrome to sit under, so the insets are
+    // genuinely zero here - not unknown.
+    isExpanded: true,
+    isFullscreen: false,
+    safeAreaInset: { top: 0, right: 0, bottom: 0, left: 0 },
+    contentSafeAreaInset: { top: 0, right: 0, bottom: 0, left: 0 },
+    onEvent() {},
+    offEvent() {},
     HapticFeedback: {
       impactOccurred() {},
       notificationOccurred() {},
@@ -1936,6 +1944,85 @@ async function load() {
   updateDevBannerText();
 }
 
+// --- Safe areas -----------------------------------------------------------
+//
+// Telegram's header - the Close button and the chevron - can sit *over* the
+// web view rather than above it, which is why the countdown banner was landing
+// underneath it. There are two insets and they stack:
+//
+//   safeAreaInset         the device's own: notch, rounded corners, home bar
+//   contentSafeAreaInset  Telegram's chrome inside that
+//
+// Both are read rather than assumed. A fixed margin would be wrong on any
+// device whose chrome differs from the one it was measured on, and would rot
+// the moment Telegram changes its header.
+
+// Bot API 8.0 introduced both properties, and also introduced the fullscreen
+// mode that makes the chrome overlap in the first place. A client too old to
+// report them is also too old to overlap, so zero is the correct fallback
+// there rather than a guess. This constant covers the remaining case: a client
+// that says it is fullscreen but does not report the inset.
+const FALLBACK_HEADER_PX = 56;
+
+function insetOf(name) {
+  const value = tg[name];
+  if (!value || typeof value !== "object") return null;
+  const read = (side) => (Number.isFinite(value[side]) ? Math.max(0, value[side]) : 0);
+  return { top: read("top"), right: read("right"), bottom: read("bottom"), left: read("left") };
+}
+
+function applySafeArea() {
+  const root = document.documentElement;
+  const device = insetOf("safeAreaInset");
+  const content = insetOf("contentSafeAreaInset");
+
+  // Nothing to go on. Leave the CSS alone so the env() fallbacks in the
+  // stylesheet - the browser's own device insets - stay in effect.
+  if (!device && !content) {
+    if (tg.isFullscreen) {
+      root.style.setProperty("--safe-top", `calc(env(safe-area-inset-top, 0px) + ${FALLBACK_HEADER_PX}px)`);
+    }
+    return;
+  }
+
+  const zero = { top: 0, right: 0, bottom: 0, left: 0 };
+  const d = device || zero;
+  let c = content || zero;
+  // Fullscreen with no reported chrome inset: the header is over the content
+  // and we have no measurement, so fall back rather than render underneath it.
+  if (!content && tg.isFullscreen) c = { ...zero, top: FALLBACK_HEADER_PX };
+
+  const sides = { top: d.top + c.top, right: d.right + c.right, bottom: d.bottom + c.bottom, left: d.left + c.left };
+  Object.entries(sides).forEach(([side, px]) => {
+    // max() with the browser's own value rather than a bare override: a client
+    // that reports 0 for a device inset the browser knows about - a home
+    // indicator under the web view, say - must not talk us out of it. Telegram's
+    // number wins whenever it is the larger one, which is the case that matters.
+    root.style.setProperty(
+      `--safe-${side}`,
+      `max(env(safe-area-inset-${side}, 0px), ${px}px)`
+    );
+  });
+  console.info("[planner] safe area", sides, "expanded=", tg.isExpanded, "fullscreen=", tg.isFullscreen);
+}
+
+function watchSafeArea() {
+  if (typeof tg.onEvent !== "function") return;
+  // viewportChanged fires on expand/collapse, which changes how much chrome
+  // there is; the other three are the direct notifications.
+  ["safeAreaChanged", "contentSafeAreaChanged", "viewportChanged", "fullscreenChanged"].forEach(
+    (event) => {
+      try {
+        tg.onEvent(event, applySafeArea);
+      } catch (err) {
+        // An older client rejects an event name it does not know. The others
+        // still register, and the initial read has already happened.
+        console.warn(`[planner] no ${event} event on this client`, err);
+      }
+    }
+  );
+}
+
 function applyTelegramTheme() {
   // Telegram exposes its palette as CSS variables; adopt them when present so
   // the app matches the client's theme.
@@ -1960,4 +2047,8 @@ setupDevBanner();
 applyTelegramTheme();
 tg.ready();
 tg.expand();
+// After expand(): expanding changes the viewport and therefore the insets, and
+// the event handler catches the value the client settles on.
+applySafeArea();
+watchSafeArea();
 load();

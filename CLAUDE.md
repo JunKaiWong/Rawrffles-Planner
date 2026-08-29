@@ -545,6 +545,19 @@ because both were shipped once:
   back out. The page is then wider than the screen and scrolls sideways, which
   reads as a broken layout rather than as a zoom.
 
+- **Telegram's chrome can sit over the web view, not above it.** The Close
+  button and header overlapped the countdown banner until the safe areas were
+  read. Two insets stack and both must be applied: `safeAreaInset` is the
+  device's (notch, home indicator) and `contentSafeAreaInset` is Telegram's own
+  chrome inside it. They are exposed as `--safe-top` / `--safe-right` /
+  `--safe-bottom` / `--safe-left`, refreshed on `safeAreaChanged`,
+  `contentSafeAreaChanged`, `viewportChanged` and `fullscreenChanged`, and
+  every fixed or sticky element consumes them. Never substitute a measured
+  constant: it would be wrong on the next device and would rot the moment
+  Telegram changes its header. The CSS `env(safe-area-inset-*)` values are the
+  floor, so a client reporting zero for an inset the browser knows about cannot
+  talk the app out of it.
+
 Check changes at 320px as well as 390px, and check the dialogs, not just the
 list: the done, date, day and plan sheets are all easy to leave overflowing
 because they are usually opened on a desktop while developing. The screenshots
