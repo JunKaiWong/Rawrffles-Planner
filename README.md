@@ -32,6 +32,11 @@ that only ever suggests places you actually chose.
   results flagged rather than guessed
 - **Mini App** — To visit / Day trips / Done / Calendar / Settings tabs,
   category and tag filters, ratings out of 10, and notes
+- **Manual entries** — add a place you tried without a link: name, location,
+  category, tags, rating and photos, straight into Done if you have already
+  been. Geocoded like any link, so the planner can use it
+- **Editing** — fix a title or location a parse got wrong, change a rating or
+  note, add or remove photos, without re-sending the link
 - **Photos** — the screenshot of a post previews on its card, so a menu or an
   event poster is visible at a glance; photos from the day attach to a link
   when you mark it done. The two are stored separately: only the screenshot is

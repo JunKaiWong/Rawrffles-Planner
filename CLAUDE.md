@@ -32,6 +32,10 @@ users allowlisted, Mini App opening from the Telegram group.
 | OneMap venue gap-filling when saved links leave a hole | Done |
 | Shared calendar — month view, free-text notes, both users | Done |
 | In-app settings: stops per plan, nearby radius, home region | Done |
+| Manual entries — a place with no link behind it | Done |
+| Edit dialog: title, location, category, tags, rating, note | Done |
+| Separate geocode hint, re-geocoding on save | Done |
+| Badge + count for links geocoding could not place | Done |
 | `link_photos` table, intake vs visit photos | Done |
 | Screenshot previews on cards + full-size viewer | Done |
 | Visit photos: Mini App upload and `+visit` in chat | Done |
@@ -210,6 +214,13 @@ list, enforced in code (invalid value → `other`, logged):
 **Return `other` rather than guess.** A confidently wrong category silently
 hides links from filtered views. `other/other` is an honest shrug, not content.
 
+**A manual entry is never parsed.** Its fields were typed directly, so there
+is nothing to extract and no quota to spend. `parsed_at` is stamped at creation
+for exactly that reason: leaving it NULL would queue the row for a Gemini call
+to rediscover what someone had just written by hand. Everything that reads a
+post — caption parsing, extraction retries, metadata backfill — additionally
+filters on `url IS NOT NULL`.
+
 **Cache everything.** `parsed_at` marks a link as asked-about, including
 caption-less posts skipped without a model call. A planning run must never
 re-spend quota. Failed parses leave `parsed_at` NULL so they stay retryable.
@@ -240,6 +251,22 @@ OneMap's search endpoint (no auth) turns each link's `location` string into
 `lat`/`lng`. It runs **once per link, not once per plan**: `geocoded_at` marks
 the attempt and `geocode_status` records why it failed, because NULL
 coordinates plus a status is not the same thing as never having tried.
+
+**Display and lookup are separate columns.** `location` holds what a human
+needs in order to find the place — outlet name, unit number, street — and that
+is exactly what makes OneMap miss: it does not understand `#02-38`, and
+"Singapore" matches half the island. Shortening the address to help the lookup
+would degrade the thing the couple actually reads. So `geocode_hint` carries a
+postal code or bare street, is used for lookup only, and is never displayed.
+Saving one re-runs geocoding; so does changing `location`. Both are editable in
+the Mini App, because the person who knows where the place actually is is the
+one holding the phone.
+
+**A failed lookup is visible.** `geocode_status` of `ambiguous` or `not_found`
+means the planner drops the link silently, so the card carries a badge and the
+header a count. The badge is a button: it opens the edit dialog with the hint
+field focused, because that field is the answer to what the badge is
+complaining about.
 
 Non-Singapore locations fail gracefully and keep their day-trip flag rather
 than taking the row down with them. Vague locations ("McDonald's") have no
@@ -337,10 +364,17 @@ path where a browser cannot downscale, not the normal case.
 
 ## Database
 
+`url` and `platform` are nullable. A **manual entry** — a place tried without
+a post behind it — is a row in `links` rather than a table of its own: it needs
+the same fields, the same geocoding, and the planner must not be able to tell
+the difference. NULL is the honest value there; an empty string would be a URL
+that happens to be blank. The Mini App renders no "Open" button when there is
+no URL, and no source badge when there is no platform.
+
 `links(id, url, canonical_url, platform, caption, title, tags, added_by,
 added_at, parsed_at, done, done_at, done_by, rating, note, photo_file_id,
-event_start, event_end, is_evergreen, location, region, lat, lng, geocoded_at,
-geocode_status, category, subcategory)`
+event_start, event_end, is_evergreen, location, geocode_hint, region, lat, lng,
+geocoded_at, geocode_status, category, subcategory)`
 
 `link_photos(id, link_id, file_id, thumb_file_id, image_data, content_type,
 digest, kind, added_by, added_at)` — `kind` is `intake` | `visit`.
