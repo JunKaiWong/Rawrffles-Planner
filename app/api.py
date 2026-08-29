@@ -31,13 +31,15 @@ from datetime import date
 from fastapi import (
     Depends,
     FastAPI,
+    File,
     HTTPException,
     Path as PathParam,
     Query,
     Request,
+    UploadFile,
     status,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -46,17 +48,23 @@ from app.auth import InitDataError, TelegramUser, authorise_user
 from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.engine import describe
 from app.db.database import (
+    PHOTO_INTAKE,
+    PHOTO_VISIT,
     add_date,
+    add_link_photos,
     claim_update,
     delete_date,
     get_date,
     get_link,
+    get_link_photo,
     get_plan,
     init_db,
     is_day_trip,
     list_calendar_notes,
     list_dates,
+    list_link_photos,
     list_links,
+    photos_by_link,
     prune_processed_updates,
     release_update,
     save_calendar_note,
@@ -65,6 +73,7 @@ from app.db.database import (
     update_date,
     update_link,
 )
+from app.handlers.link_handler import photo_sizes
 from app.handlers.plan_handler import next_saturday
 from app.services import appsettings as app_settings
 from app.services.planner import plan_date
@@ -78,6 +87,11 @@ from app.services.reminders import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Telegram's own sendPhoto ceiling. A constant rather than a setting because it
+# is the provider's limit, not a preference: raising it here would only move
+# the rejection from this handler to Telegram, with a worse error message.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 INIT_DATA_HEADER = "X-Telegram-Init-Data"
 
@@ -153,10 +167,31 @@ class LinkOut(BaseModel):
     done_by: int | None = None
     rating: int | None = None
     note: str | None = None
-    photo_file_id: str | None = None
+    # Telegram file_ids are deliberately NOT exposed. A client cannot do
+    # anything with one except hand it back, and the bot token is what turns
+    # an id into an image, so the photo is addressed by its row id and the
+    # bytes come from the endpoint below.
+    photos: list["PhotoOut"] = []
     event_start: str | None = None
     event_end: str | None = None
     is_evergreen: bool
+
+
+class PhotoOut(BaseModel):
+    """One photo attached to a link.
+
+    `kind` is the whole point: 'intake' is a screenshot of the post, which the
+    parser reads as data and which a card previews; 'visit' is a photo from
+    the day, which is only ever shown back to the couple.
+    """
+
+    id: int
+    kind: str  # intake | visit
+    added_by: int | None = None
+    added_at: str
+    # Ready to use as a URL; the client never assembles paths itself.
+    url: str
+    thumb_url: str
 
 
 class DateOut(BaseModel):
@@ -317,8 +352,27 @@ class LinkUpdate(BaseModel):
     )
 
 
-def _row_to_link(row, home_region: str | None = None) -> LinkOut:
+def _photo_out(row) -> PhotoOut:
+    data = dict(row)
+    photo_id = int(data["id"])
+    base = f"/api/links/{int(data['link_id'])}/photos/{photo_id}"
+    return PhotoOut(
+        id=photo_id,
+        kind=data["kind"],
+        added_by=data.get("added_by"),
+        added_at=data["added_at"],
+        url=base,
+        # Falls back to the full size server-side when no smaller one was
+        # offered, so the client can always ask for a thumbnail.
+        thumb_url=f"{base}?size=thumb",
+    )
+
+
+def _row_to_link(
+    row, home_region: str | None = None, photos: list | None = None
+) -> LinkOut:
     data: dict[str, Any] = dict(row)
+    data["photos"] = [_photo_out(photo) for photo in (photos or [])]
     # SQLite stores booleans as integers.
     data["done"] = bool(data["done"])
     data["is_evergreen"] = bool(data["is_evergreen"])
@@ -958,8 +1012,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         so both are returned together."""
         rows = list_links(settings.db_path)
         home = app_settings.load(settings.db_path).home_region
+        # One query for every photo rather than one per card.
+        grouped = photos_by_link(settings.db_path)
         logger.debug("returning %d link(s) to user %s", len(rows), user.id)
-        return [_row_to_link(row, home) for row in rows]
+        return [
+            _row_to_link(row, home, grouped.get(int(dict(row)["id"]), []))
+            for row in rows
+        ]
 
     @app.patch(
         "/api/links/{link_id}",
@@ -996,7 +1055,182 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"link {link_id} not found",
             )
-        return _row_to_link(row)
+        return _row_to_link(
+            row, photos=list_link_photos(settings.db_path, link_id)
+        )
+
+    @app.get(
+        "/api/links/{link_id}/photos/{photo_id}",
+        tags=["links"],
+        summary="Stream one photo's bytes",
+        response_class=Response,
+        responses={200: {"content": {"image/jpeg": {}}}},
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def read_link_photo(
+        link_id: Annotated[int, PathParam(ge=1)],
+        photo_id: Annotated[int, PathParam(ge=1)],
+        user: Annotated[TelegramUser, Depends(current_user)],
+        size: Annotated[str, Query(pattern="^(full|thumb)$")] = "full",
+    ) -> Response:
+        """Fetch the image from Telegram and return the bytes.
+
+        This has to be a proxy. Turning a file_id into an image needs the bot
+        token, and a URL carrying that token would let anyone holding it read
+        every file the bot has ever seen - so the token stays server-side and
+        the client only ever names a row.
+
+        The consequence, which the Mini App has to live with, is that these
+        bytes sit behind the same initData header as everything else, and an
+        <img src> cannot send a header. The client fetches them and renders a
+        blob URL instead.
+
+        Nothing is stored: Telegram re-serves the image on demand, and the
+        response carries a private cache header so re-rendering a card does
+        not ask twice.
+        """
+        row = await asyncio.to_thread(get_link_photo, settings.db_path, photo_id)
+        # Right photo but wrong link is a 404, not a redirect: the pair of ids
+        # names one thing or nothing.
+        if row is None or int(dict(row)["link_id"]) != link_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"photo {photo_id} not found on link {link_id}",
+            )
+        data = dict(row)
+        file_id = data["file_id"]
+        if size == "thumb" and data.get("thumb_file_id"):
+            file_id = data["thumb_file_id"]
+
+        bot = Bot(settings.bot_token)
+        try:
+            async with bot:
+                telegram_file = await bot.get_file(file_id)
+                content = bytes(await telegram_file.download_as_bytearray())
+        except Exception as exc:
+            logger.exception("could not fetch photo %s (file_id=%s)", photo_id, file_id)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"could not fetch the photo: {exc}",
+            ) from exc
+
+        path = (getattr(telegram_file, "file_path", "") or "").lower()
+        media_type = "image/png" if path.endswith(".png") else "image/jpeg"
+        logger.info(
+            "served photo %s (%s, %d bytes) to user %s",
+            photo_id,
+            size,
+            len(content),
+            user.id,
+        )
+        return Response(
+            content=content,
+            media_type=media_type,
+            # private: one couple's photo, not something a proxy on the way
+            # should keep. immutable because a row's file_id never changes.
+            headers={"Cache-Control": "private, max-age=86400, immutable"},
+        )
+
+    @app.post(
+        "/api/links/{link_id}/photos",
+        response_model=PhotoOut,
+        status_code=status.HTTP_201_CREATED,
+        tags=["links"],
+        summary="Attach a photo from the visit",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def upload_link_photo(
+        link_id: Annotated[int, PathParam(ge=1)],
+        user: Annotated[TelegramUser, Depends(current_user)],
+        file: Annotated[UploadFile, File(description="An image from the visit")],
+    ) -> PhotoOut:
+        """Store a photo taken on the day.
+
+        Uploads are always 'visit'. An intake screenshot is model input and
+        arrives through the bot, where the caption says which link it belongs
+        to; nothing the Mini App uploads is ever shown to Gemini.
+
+        **This posts the photo to the group.** Not a flourish - the Bot API
+        mints a file_id only by sending the photo somewhere, and file_ids are
+        what this app stores instead of image bytes. Since the alternative is
+        holding bytes on a host with no persistent disk, the photo goes to the
+        couple's own chat, captioned with the place.
+        """
+        link = await asyncio.to_thread(get_link, settings.db_path, link_id)
+        if link is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"link {link_id} not found",
+            )
+
+        if not (file.content_type or "").startswith("image/"):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail=f"expected an image, got {file.content_type or 'no content type'}",
+            )
+
+        content = await file.read()
+        if not content:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="that file was empty"
+            )
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=(
+                    f"that photo is {len(content) // (1024 * 1024)}MB; Telegram "
+                    f"accepts up to {MAX_UPLOAD_BYTES // (1024 * 1024)}MB"
+                ),
+            )
+
+        row = dict(link)
+        place = row.get("title") or row.get("location") or row["url"]
+        caption = f"\U0001f4f8 {place}"
+
+        bot = Bot(settings.bot_token)
+        try:
+            async with bot:
+                sent = await bot.send_photo(
+                    chat_id=settings.chat_id, photo=content, caption=caption
+                )
+        except Exception as exc:
+            logger.exception("could not relay a photo for link %s", link_id)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Telegram would not accept the photo: {exc}",
+            ) from exc
+
+        sizes = photo_sizes(sent)
+        if sizes is None:
+            # sendPhoto succeeded but returned no sizes: nothing to store.
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Telegram accepted the photo but returned no file id",
+            )
+
+        added = await asyncio.to_thread(
+            add_link_photos, settings.db_path, link_id, [sizes], PHOTO_VISIT, user.id
+        )
+        if not added:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="that photo is already attached to this link",
+            )
+
+        stored = [
+            r
+            for r in await asyncio.to_thread(
+                list_link_photos, settings.db_path, link_id, PHOTO_VISIT
+            )
+            if dict(r)["file_id"] == sizes[0]
+        ]
+        logger.info(
+            "user %s attached a visit photo to link %s (%d bytes)",
+            user.id,
+            link_id,
+            len(content),
+        )
+        return _photo_out(stored[-1])
 
     return app
 

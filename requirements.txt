@@ -1,5 +1,7 @@
 python-telegram-bot
 fastapi
+# Required by FastAPI to parse the Mini App's multipart photo upload.
+python-multipart
 uvicorn[standard]
 yt-dlp
 requests
