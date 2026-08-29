@@ -11,6 +11,8 @@ itinerary from what you've saved.
 Runs entirely on free tiers.
 
 ![The Mini App's main list: countdown banner, tabs, filters, and saved links with location, dates, category and tags](docs/images/default_page.png)
+*Screenshots are from a desktop browser during development; in normal use the
+Mini App opens full-screen inside Telegram on a phone.*
 
 ## Why
 
