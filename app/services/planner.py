@@ -30,6 +30,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
+from app.db.database import is_day_trip
 from app.services.geocoder import distance_metres
 
 logger = logging.getLogger(__name__)
@@ -160,12 +161,24 @@ def urgency_tier(event_end: str | None, is_evergreen: bool, today: date) -> str 
     return TIER_FLEXIBLE
 
 
-def select_candidates(rows, today: date | None = None) -> list[Candidate]:
+def select_candidates(
+    rows, today: date | None = None, home_region: str | None = None
+) -> list[Candidate]:
     """Links that could appear in a plan today.
 
     Excluded: anything done, anything expired, anything without coordinates
     (it cannot be placed in a cluster), and day trips, which are kept and
     browsable but are not an MRT stop away.
+
+    The day-trip check is explicit rather than implied. Geocoding skips
+    locations outside the home region, so day trips usually have no
+    coordinates and would fall out at the check above anyway - but "usually"
+    is not a filter. A link geocoded before its region was known, or one whose
+    region changed on a re-parse, keeps coordinates that are real and outside
+    Singapore, and single-linkage clustering would happily chain a Johor
+    dessert shop onto a Tanjong Pagar dinner. `home_region` comes from the
+    couple's settings, so changing it in the Mini App moves both this filter
+    and the Day trips tab together.
     """
     today = today or date.today()
     candidates: list[Candidate] = []
@@ -174,6 +187,13 @@ def select_candidates(rows, today: date | None = None) -> list[Candidate]:
         if data.get("done"):
             continue
         if data.get("lat") is None or data.get("lng") is None:
+            continue
+        if is_day_trip(data.get("region"), home_region):
+            logger.debug(
+                "id=%s is a day trip (region=%s), excluded",
+                data["id"],
+                data.get("region"),
+            )
             continue
         tier = urgency_tier(
             data.get("event_end"), bool(data.get("is_evergreen")), today
@@ -537,7 +557,13 @@ def _spread(candidates: list[Candidate]) -> int:
     )
 
 
-def _explain_exclusions(rows, chosen: set[int], usable: set[int], today: date) -> dict[int, str]:
+def _explain_exclusions(
+    rows,
+    chosen: set[int],
+    usable: set[int],
+    today: date,
+    home_region: str | None = None,
+) -> dict[int, str]:
     """Why a explicitly chosen link did not make it into the plan."""
     reasons: dict[int, str] = {}
     for row in rows:
@@ -547,6 +573,10 @@ def _explain_exclusions(rows, chosen: set[int], usable: set[int], today: date) -
             continue
         if data.get("done"):
             reasons[link_id] = "already done"
+        # Checked before coordinates: a day trip is normally never geocoded, so
+        # the honest reason is where it is, not that the lookup was skipped.
+        elif is_day_trip(data.get("region"), home_region):
+            reasons[link_id] = f"a day trip ({data.get('region')}), not a local outing"
         elif data.get("lat") is None:
             reasons[link_id] = f"no coordinates ({data.get('geocode_status') or 'not geocoded'})"
         elif urgency_tier(data.get("event_end"), bool(data.get("is_evergreen")), today) is None:
@@ -584,12 +614,14 @@ def plan_date(
     # How many stops, and how wide a cluster, are settings the couple can
     # change from the Mini App, so they are read rather than compiled in.
     limit = MAX_STOPS
+    home_region = None
     if settings is not None:
         try:
             from app.services.appsettings import load as load_app_settings
 
             configured = load_app_settings(settings.db_path)
             limit = configured.max_stops
+            home_region = configured.home_region
             if radius_metres is None:
                 radius_metres = configured.cluster_radius_metres
         except Exception:
@@ -599,11 +631,13 @@ def plan_date(
 
     warnings: list[str] = []
 
-    candidates = select_candidates(rows, today)
+    candidates = select_candidates(rows, today, home_region)
     if link_ids:
         chosen = {int(i) for i in link_ids}
         usable = [c for c in candidates if c.id in chosen]
-        excluded = _explain_exclusions(rows, chosen, {c.id for c in usable}, today)
+        excluded = _explain_exclusions(
+            rows, chosen, {c.id for c in usable}, today, home_region
+        )
         if not usable:
             return Plan(
                 ok=False,
