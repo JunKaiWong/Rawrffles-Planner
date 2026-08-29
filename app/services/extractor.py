@@ -372,7 +372,16 @@ def extract(url: str) -> Metadata:
     if info is None:
         # Metadata is unavailable, but a canonical URL usually is not - resolve
         # it separately so de-duplication still works for this link.
-        canonical = canonicalise(resolve_via_redirect(url))
+        #
+        # Falling back to the pasted URL matters more than it looks. Resolution
+        # is a network call, so a timeout used to leave canonical_url NULL even
+        # for a full-form URL that never needed resolving - and a NULL key
+        # de-duplicates against nothing. Canonicalising the raw URL is pure
+        # string work: for a full URL it is exactly the key the success path
+        # would have produced, and for a share link it degrades to a stable
+        # key for that link rather than to nothing. It can never merge two
+        # different posts, because it is derived from the URL itself.
+        canonical = canonicalise(resolve_via_redirect(url)) or canonicalise(url)
         logger.info(
             "yt-dlp extraction failed for %s; canonical=%s (from redirect)", url, canonical
         )
@@ -384,9 +393,13 @@ def extract(url: str) -> Metadata:
                 return recovered
         return Metadata(raw_url=url, ok=False, canonical_url=canonical, error=error)
 
-    canonical = canonicalise(
-        _clean(info.get("webpage_url")) or _clean(info.get("original_url"))
-    ) or canonicalise(resolve_via_redirect(url))
+    canonical = (
+        canonicalise(_clean(info.get("webpage_url")) or _clean(info.get("original_url")))
+        or canonicalise(resolve_via_redirect(url))
+        # Same last resort as the failure branch above: a key derived from the
+        # pasted URL always beats no key at all.
+        or canonicalise(url)
+    )
 
     metadata = Metadata(
         raw_url=url,
