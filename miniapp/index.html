@@ -257,11 +257,12 @@
 
       <!--
         Photos from the day. They upload as they are picked, not on Save: the
-        upload relays through Telegram and can take a few seconds, which would
-        make Save look stuck.
+        image is downscaled and sent, which takes a moment on a phone and would
+        make Save look stuck. They stay in the app - nothing is posted to the
+        group.
       -->
       <div class="field">
-        <span class="field__label">Photos <span class="field__hint">optional, posted to the group</span></span>
+        <span class="field__label">Photos <span class="field__hint">optional, kept in the app</span></span>
         <div class="thumbs-strip" id="sheet-photos"></div>
         <button type="button" class="btn btn--ghost btn--sm" id="photo-add">Add photo</button>
         <input type="file" id="photo-input" accept="image/*" multiple hidden />

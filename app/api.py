@@ -48,10 +48,8 @@ from app.auth import InitDataError, TelegramUser, authorise_user
 from app.config import PROJECT_ROOT, WEBHOOK, Settings, load_settings
 from app.db.engine import describe
 from app.db.database import (
-    PHOTO_INTAKE,
-    PHOTO_VISIT,
     add_date,
-    add_link_photos,
+    add_uploaded_photo,
     claim_update,
     delete_date,
     get_date,
@@ -66,6 +64,7 @@ from app.db.database import (
     list_links,
     photos_by_link,
     prune_processed_updates,
+    read_link_photo_bytes,
     release_update,
     save_calendar_note,
     save_plan,
@@ -73,7 +72,6 @@ from app.db.database import (
     update_date,
     update_link,
 )
-from app.handlers.link_handler import photo_sizes
 from app.handlers.plan_handler import next_saturday
 from app.services import appsettings as app_settings
 from app.services.planner import plan_date
@@ -88,10 +86,13 @@ from app.services.reminders import (
 
 logger = logging.getLogger(__name__)
 
-# Telegram's own sendPhoto ceiling. A constant rather than a setting because it
-# is the provider's limit, not a preference: raising it here would only move
-# the rejection from this handler to Telegram, with a worse error message.
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+# A guard on the database, not a preference. Uploaded photos are stored as
+# bytes in Postgres (see add_uploaded_photo), and Neon's free tier is 0.5GB, so
+# an unbounded upload is the one thing that could actually fill it. The Mini App
+# downscales in a canvas before sending, which puts a normal photo two orders of
+# magnitude under this; the ceiling only catches the fallback path where
+# downscaling was unavailable.
+MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 
 INIT_DATA_HEADER = "X-Telegram-Init-Data"
 
@@ -1085,9 +1086,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         <img src> cannot send a header. The client fetches them and renders a
         blob URL instead.
 
-        Nothing is stored: Telegram re-serves the image on demand, and the
-        response carries a private cache header so re-rendering a card does
-        not ask twice.
+        A photo has one of two sources. An upload from the Mini App is held
+        here as bytes and returned directly. Everything that arrived through
+        the group - every intake screenshot, and any +visit photo - is held by
+        Telegram, and only its file_id is stored, so it is fetched on demand.
+
+        The response carries a private cache header either way, so re-rendering
+        a card does not ask twice.
         """
         row = await asyncio.to_thread(get_link_photo, settings.db_path, photo_id)
         # Right photo but wrong link is a 404, not a redirect: the pair of ids
@@ -1098,9 +1103,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"photo {photo_id} not found on link {link_id}",
             )
         data = dict(row)
+
+        # An uploaded photo has no thumbnail: the Mini App downscaled it before
+        # sending, so the stored image is already preview-sized and `size` has
+        # nothing to choose between.
+        stored = await asyncio.to_thread(
+            read_link_photo_bytes, settings.db_path, photo_id
+        )
+        if stored is not None:
+            content, media_type = stored
+            logger.info(
+                "served photo %s from storage (%d bytes) to user %s",
+                photo_id,
+                len(content),
+                user.id,
+            )
+            return Response(
+                content=content,
+                media_type=media_type,
+                headers={"Cache-Control": "private, max-age=86400, immutable"},
+            )
+
         file_id = data["file_id"]
         if size == "thumb" and data.get("thumb_file_id"):
             file_id = data["thumb_file_id"]
+        if not file_id:
+            # Neither bytes nor an id: the row is unreadable rather than absent,
+            # and saying so beats a broken image with a 200.
+            logger.error("photo %s has neither stored bytes nor a file_id", photo_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"photo {photo_id} has no image",
+            )
 
         bot = Bot(settings.bot_token)
         try:
@@ -1150,11 +1184,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         arrives through the bot, where the caption says which link it belongs
         to; nothing the Mini App uploads is ever shown to Gemini.
 
-        **This posts the photo to the group.** Not a flourish - the Bot API
-        mints a file_id only by sending the photo somewhere, and file_ids are
-        what this app stores instead of image bytes. Since the alternative is
-        holding bytes on a host with no persistent disk, the photo goes to the
-        couple's own chat, captioned with the place.
+        **Nothing is posted to the group.** An earlier version relayed the
+        photo through the bot to obtain a Telegram file_id, since that is the
+        only way to mint one. That put the couple's photos in their own chat as
+        a side effect of how storage worked, which is not what the group is
+        for - it carries intake and notifications, never content they did not
+        send themselves. The bytes are stored instead. The usual "file_ids, not
+        images" rule does not apply here, because its premise is that Telegram
+        already holds the picture; an upload has never been near Telegram.
         """
         link = await asyncio.to_thread(get_link, settings.db_path, link_id)
         if link is None:
@@ -1183,54 +1220,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             )
 
-        row = dict(link)
-        place = row.get("title") or row.get("location") or row["url"]
-        caption = f"\U0001f4f8 {place}"
-
-        bot = Bot(settings.bot_token)
-        try:
-            async with bot:
-                sent = await bot.send_photo(
-                    chat_id=settings.chat_id, photo=content, caption=caption
-                )
-        except Exception as exc:
-            logger.exception("could not relay a photo for link %s", link_id)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Telegram would not accept the photo: {exc}",
-            ) from exc
-
-        sizes = photo_sizes(sent)
-        if sizes is None:
-            # sendPhoto succeeded but returned no sizes: nothing to store.
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Telegram accepted the photo but returned no file id",
-            )
-
-        added = await asyncio.to_thread(
-            add_link_photos, settings.db_path, link_id, [sizes], PHOTO_VISIT, user.id
+        photo_id = await asyncio.to_thread(
+            add_uploaded_photo,
+            settings.db_path,
+            link_id,
+            content,
+            file.content_type,
+            user.id,
         )
-        if not added:
+        if photo_id is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="that photo is already attached to this link",
             )
 
-        stored = [
-            r
-            for r in await asyncio.to_thread(
-                list_link_photos, settings.db_path, link_id, PHOTO_VISIT
-            )
-            if dict(r)["file_id"] == sizes[0]
-        ]
+        saved = await asyncio.to_thread(get_link_photo, settings.db_path, photo_id)
         logger.info(
             "user %s attached a visit photo to link %s (%d bytes)",
             user.id,
             link_id,
             len(content),
         )
-        return _photo_out(stored[-1])
+        return _photo_out(saved)
 
     return app
 

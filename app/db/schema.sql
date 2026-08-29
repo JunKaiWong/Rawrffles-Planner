@@ -107,14 +107,38 @@ CREATE TABLE IF NOT EXISTS plans (
 -- couple a screenshot of a menu as a souvenir, so the column is NOT NULL and
 -- every read filters on it.
 --
+-- A photo has exactly one source, and which one depends on how it arrived:
+--
+--   file_id      - the image is held by Telegram, because it was sent to the
+--                  group. Every intake screenshot, and any visit photo sent
+--                  with a +visit caption. Telegram re-serves these for free,
+--                  so no bytes are stored here.
+--   image_data   - the image was uploaded from the Mini App and has never
+--                  touched Telegram. Storing bytes contradicts the usual rule
+--                  precisely because that rule's premise (Telegram already
+--                  holds it) does not apply. The bot deliberately does NOT
+--                  relay uploads to the group to obtain a file_id: it posts
+--                  only notifications and never content the couple did not
+--                  send themselves.
+--
+-- Exactly one of the two is set. file_id is therefore nullable.
+--
 -- file_id is the largest size Telegram offers (what the parser wants);
 -- thumb_file_id is a smaller size for card previews, NULL when none was
--- offered, in which case callers fall back to file_id.
+-- offered, in which case callers fall back to file_id. An uploaded photo has
+-- no thumbnail: the Mini App downscales it in a canvas before sending, so the
+-- stored image is already preview-sized.
+--
+-- digest is the SHA-256 of an uploaded image, and exists only so that picking
+-- the same photo twice is a no-op, the way an identical file_id already is.
 CREATE TABLE IF NOT EXISTS link_photos (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     link_id       INTEGER NOT NULL REFERENCES links(id) ON DELETE CASCADE,
-    file_id       TEXT    NOT NULL,
+    file_id       TEXT,
     thumb_file_id TEXT,
+    image_data    BLOB,
+    content_type  TEXT,
+    digest        TEXT,
     kind          TEXT    NOT NULL,       -- 'intake' | 'visit'
     added_by      INTEGER,                -- NULL for rows migrated from photo_file_id
     added_at      TEXT    NOT NULL

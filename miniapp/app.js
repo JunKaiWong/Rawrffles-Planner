@@ -368,6 +368,41 @@ function hydratePhotos(root) {
   });
 }
 
+// Photos are stored as bytes in Postgres rather than as Telegram file_ids,
+// because the bot must not post the couple's photos into their own group just
+// to mint an id. Bytes cost database, and a modern phone camera produces 3-6MB
+// files, so the image is downscaled here before it is sent. A long edge of
+// 1600px is more than a card thumbnail or the full-size viewer can show on a
+// phone, and it lands a typical photo in the low hundreds of KB.
+const PHOTO_MAX_EDGE = 1600;
+const PHOTO_QUALITY = 0.85;
+
+async function downscale(file) {
+  // Best effort. createImageBitmap and canvas.toBlob are widely supported, but
+  // if either is missing or the file is not decodable, sending the original is
+  // better than refusing the upload - the server's size cap is the backstop.
+  try {
+    if (!file.type.startsWith("image/")) return file;
+    const bitmap = await createImageBitmap(file);
+    const longest = Math.max(bitmap.width, bitmap.height);
+    const scale = Math.min(1, PHOTO_MAX_EDGE / longest);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", PHOTO_QUALITY)
+    );
+    // Re-encoding a small screenshot can make it bigger; keep whichever wins.
+    if (!blob || blob.size >= file.size) return file;
+    return new File([blob], "photo.jpg", { type: "image/jpeg" });
+  } catch (err) {
+    console.warn("[planner] could not downscale; sending the original", err);
+    return file;
+  }
+}
+
 async function uploadPhoto(linkId, file) {
   // Not api(): that sets a JSON content type, and multipart needs the boundary
   // the browser generates.
@@ -753,7 +788,7 @@ async function addPhotos(files) {
     for (const [index, file] of files.entries()) {
       els.photoAdd.textContent =
         files.length > 1 ? `Uploading ${index + 1}/${files.length}…` : "Uploading…";
-      const photo = await uploadPhoto(link.id, file);
+      const photo = await uploadPhoto(link.id, await downscale(file));
       link.photos = [...(link.photos || []), photo];
       added += 1;
       renderSheetPhotos();

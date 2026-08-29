@@ -8,6 +8,7 @@ Every write logs what it did (or why it didn't), so a surprising row in the DB
 can be traced back to a specific update in the log.
 """
 
+import hashlib
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -110,6 +111,7 @@ def init_db(db_path: str | Path) -> None:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate(conn)
         _migrate_availability(conn)
+        _migrate_link_photos(conn)
         _backfill_link_photos(conn)
         tables = [
             row["name"]
@@ -398,7 +400,9 @@ def list_link_photos(
 ) -> list[sqlite3.Row]:
     """Photos for one link, oldest first, optionally of a single kind."""
     sql = (
-        "SELECT id, link_id, file_id, thumb_file_id, kind, added_by, added_at "
+        # image_data is deliberately absent: it is megabytes, and every caller
+        # of this listing wants metadata. read_link_photo_bytes() fetches it.
+        "SELECT id, link_id, file_id, thumb_file_id, content_type, digest, kind, added_by, added_at "
         "FROM link_photos WHERE link_id = ?"
     )
     params: list = [link_id]
@@ -418,7 +422,7 @@ def photos_by_link(db_path: str | Path) -> dict[int, list[dict]]:
     grouped: dict[int, list[dict]] = {}
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, link_id, file_id, thumb_file_id, kind, added_by, added_at "
+            "SELECT id, link_id, file_id, thumb_file_id, content_type, digest, kind, added_by, added_at "
             "FROM link_photos ORDER BY link_id, id"
         ).fetchall()
     for row in rows:
@@ -432,10 +436,133 @@ def get_link_photo(db_path: str | Path, photo_id: int) -> sqlite3.Row | None:
     """One photo row, for the endpoint that streams its bytes."""
     with connect(db_path) as conn:
         return conn.execute(
-            "SELECT id, link_id, file_id, thumb_file_id, kind, added_by, added_at "
+            "SELECT id, link_id, file_id, thumb_file_id, content_type, digest, kind, added_by, added_at "
             "FROM link_photos WHERE id = ?",
             (photo_id,),
         ).fetchone()
+
+
+def add_uploaded_photo(
+    db_path: str | Path,
+    link_id: int,
+    data: bytes,
+    content_type: str,
+    added_by: int | None = None,
+    added_at: str | None = None,
+) -> int | None:
+    """Store an image uploaded from the Mini App, returning its new row id.
+
+    Bytes rather than a Telegram file_id, and that is deliberate. The usual
+    rule - store file_ids, never images - exists because Telegram already holds
+    the picture and re-serves it for free. An upload has never been to
+    Telegram, and the only way to give it a file_id would be for the bot to
+    post the couple's photo into their own group, which is not what the group
+    is for.
+
+    Returns None when this exact image is already attached to this link, so a
+    double tap on the picker is a no-op rather than a second copy. Identical
+    bytes are the upload equivalent of an identical file_id.
+    """
+    digest = hashlib.sha256(data).hexdigest()
+    added_at = added_at or utc_now_iso()
+    with connect(db_path) as conn:
+        if conn.execute("SELECT id FROM links WHERE id = ?", (link_id,)).fetchone() is None:
+            logger.info("cannot attach a photo: link id=%s does not exist", link_id)
+            return None
+        if conn.execute(
+            "SELECT id FROM link_photos WHERE link_id = ? AND digest = ?",
+            (link_id, digest),
+        ).fetchone() is not None:
+            logger.info("link id=%s already has this uploaded photo", link_id)
+            return None
+        cursor = conn.execute(
+            "INSERT INTO link_photos "
+            "(link_id, file_id, thumb_file_id, image_data, content_type, digest, "
+            " kind, added_by, added_at) "
+            "VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?) RETURNING id",
+            (link_id, data, content_type, digest, PHOTO_VISIT, added_by, added_at),
+        )
+        photo_id = int(dict(cursor.fetchone())["id"])
+    logger.info(
+        "stored uploaded photo id=%s on link id=%s (%d bytes, %s) by user %s",
+        photo_id,
+        link_id,
+        len(data),
+        content_type,
+        added_by,
+    )
+    return photo_id
+
+
+def read_link_photo_bytes(db_path: str | Path, photo_id: int) -> tuple[bytes, str] | None:
+    """The stored image for an uploaded photo, or None for a Telegram-backed one.
+
+    Kept separate from the metadata reads so that listing photos never drags
+    megabytes of image through the connection.
+    """
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT image_data, content_type FROM link_photos WHERE id = ?",
+            (photo_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    data = dict(row)
+    if data["image_data"] is None:
+        return None
+    return bytes(data["image_data"]), (data["content_type"] or "image/jpeg")
+
+
+def _migrate_link_photos(conn) -> None:
+    """Make link_photos.file_id nullable on a SQLite database that predates uploads.
+
+    SQLite cannot drop a NOT NULL constraint in place, so the table is rebuilt.
+    Guarded on the constraint actually being present, which makes this a no-op
+    on every start after the first. Postgres does the same thing with a one-line
+    ALTER in schema_postgres.sql.
+    """
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(link_photos)")}
+    if not columns:
+        return  # table absent; CREATE TABLE above will make the current shape
+    for column, column_type in (
+        ("image_data", "BLOB"),
+        ("content_type", "TEXT"),
+        ("digest", "TEXT"),
+    ):
+        if column not in columns:
+            logger.info("migrating: adding link_photos.%s (%s)", column, column_type)
+            conn.execute(f"ALTER TABLE link_photos ADD COLUMN {column} {column_type}")
+    if not columns.get("file_id", {})["notnull"]:
+        return
+    logger.info("migrating: rebuilding link_photos so file_id may be NULL")
+    conn.execute("ALTER TABLE link_photos RENAME TO link_photos_old")
+    conn.executescript(
+        """
+        CREATE TABLE link_photos (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            link_id       INTEGER NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+            file_id       TEXT,
+            thumb_file_id TEXT,
+            image_data    BLOB,
+            content_type  TEXT,
+            digest        TEXT,
+            kind          TEXT    NOT NULL,
+            added_by      INTEGER,
+            added_at      TEXT    NOT NULL
+        );
+        INSERT INTO link_photos
+            (id, link_id, file_id, thumb_file_id, image_data, content_type,
+             digest, kind, added_by, added_at)
+        SELECT id, link_id, file_id, thumb_file_id, image_data, content_type,
+               digest, kind, added_by, added_at
+          FROM link_photos_old;
+        DROP TABLE link_photos_old;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_link_photos_file
+            ON link_photos (link_id, file_id);
+        CREATE INDEX IF NOT EXISTS idx_link_photos_link
+            ON link_photos (link_id, kind, id);
+        """
+    )
 
 
 def _backfill_link_photos(conn) -> None:
