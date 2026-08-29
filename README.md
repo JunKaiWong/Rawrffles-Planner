@@ -32,6 +32,10 @@ that only ever suggests places you actually chose.
   results flagged rather than guessed
 - **Mini App** — To visit / Day trips / Done / Calendar / Settings tabs,
   category and tag filters, ratings out of 10, and notes
+- **Photos** — the screenshot of a post previews on its card, so a menu or an
+  event poster is visible at a glance; photos from the day attach to a link
+  when you mark it done. The two are stored separately: only the screenshot is
+  ever read by the model
 - **Date planner** — clusters saved links by proximity, tiers them by urgency,
   and generates an itinerary; fills gaps with real nearby venues when saved
   links don't cover them

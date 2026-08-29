@@ -32,6 +32,9 @@ users allowlisted, Mini App opening from the Telegram group.
 | OneMap venue gap-filling when saved links leave a hole | Done |
 | Shared calendar — month view, free-text notes, both users | Done |
 | In-app settings: stops per plan, nearby radius, home region | Done |
+| `link_photos` table, intake vs visit photos | Done |
+| Screenshot previews on cards + full-size viewer | Done |
+| Visit photos: Mini App upload and `+visit` in chat | Done |
 | Webhook `update_id` dedup + bounded retry | Done |
 | `/health` answering GET and HEAD, for the uptime keep-alive | Done |
 | OneMap public-transport routing times | **Not built** |
@@ -165,6 +168,22 @@ send it to the group with the post URL in the photo's caption.
 - `+photo` in the caption overrides the skip for links that already have one.
 - Store Telegram `file_id`s, never image files. Telegram re-serves them free.
 
+**Two kinds of photo, never conflated.** `link_photos.kind` separates them and
+every read filters on it:
+
+- `intake` — a screenshot of the post. This is *model input*: Gemini reads it
+  for the menu, the price, the poster's dates. It is also what a To visit card
+  previews, because a menu photo says more at a glance than 140 characters of
+  caption.
+- `visit` — a photo from the day. A memory, never shown to the model, and
+  never evidence that a post was readable.
+
+A caption carrying `+visit` files that message's photos as memories: they are
+not downloaded, not parsed, and do not count as the link having been enriched,
+so `+photo` still behaves as before afterwards. The same `file_id` is never
+stored twice for one link, whatever kind it arrives as — the same image cannot
+be both a menu the parser read and a souvenir.
+
 **Report the outcome, not the stage.** A link whose yt-dlp attempt failed but
 whose vision parse succeeded has NOT failed. Conflating the two produces scary
 warnings on working links, which trains the user to ignore warnings.
@@ -293,7 +312,18 @@ happen.
 - `rating` (1–10) — feeds back into `plan_date()` so it learns what they enjoy.
   The highest-value field in the schema.
 - `note` — practical detail ("go before 7pm or you queue")
-- `photo_file_id` — Telegram file_id list, never image bytes
+- photos — rows in `link_photos` with `kind='visit'`, never image bytes
+
+Photos reach a link two ways, both landing in the same rows: the Mini App's
+done sheet, and a `+visit` caption in the group. They upload as they are
+picked rather than on Save, because the upload relays through Telegram and
+would otherwise make Save look stuck.
+
+**An upload posts the photo to the group.** That is forced, not chosen: the Bot
+API mints a `file_id` only by sending the photo somewhere, and `file_id`s are
+what this app stores instead of bytes — which matters on a host with no
+persistent disk. The done sheet says so on the field label rather than
+surprising anyone.
 
 ## Database
 
@@ -302,14 +332,32 @@ added_at, parsed_at, done, done_at, done_by, rating, note, photo_file_id,
 event_start, event_end, is_evergreen, location, region, lat, lng, geocoded_at,
 geocode_status, category, subcategory)`
 
+`link_photos(id, link_id, file_id, thumb_file_id, kind, added_by, added_at)`
+— `kind` is `intake` | `visit`; `file_id` is the largest size Telegram offers
+(what the parser reads), `thumb_file_id` a smaller one for card previews,
+NULL when none was offered, in which case reads fall back to `file_id`.
+
 `dates(id, label, date, recurring, recurrence, reminder_days)` ·
 `availability(id, user_id, day, slot, available, note, author_name,
 reminder_days)` · `settings(key, value, updated_at)` ·
 `processed_updates(update_id, seen_at, attempts, failed)` ·
 `plans(id, week_of, summary, created_at)`
 
-Note: `photo_file_id` holds a comma-separated list rather than its own table —
-a known shortcut, tracked under Remaining work.
+Note: `links.photo_file_id` is retained but **dead**. It held a comma-separated
+list of file_ids until `link_photos` replaced it; the column is left in place
+rather than dropped, the way `dates.recurring` was, so the migration's source is
+still readable. `init_db` copies any value it finds into `link_photos` as
+`intake`, and deliberately skips a link that already has photo rows — adopting
+the old column again would resurrect a photo that had been removed. Nothing
+writes to it any more, and a value put there now would be invisible.
+
+Serving a photo has to be a proxy (`GET /api/links/{id}/photos/{photo_id}`):
+turning a `file_id` into an image needs the bot token, and a URL carrying that
+token would expose every file the bot has ever seen. The consequence is that
+image bytes sit behind the same `initData` header as everything else, and an
+`<img src>` cannot send a header — so the Mini App fetches each photo and
+renders a blob URL. A signed token in the query string was rejected: it puts a
+credential in a URL that ends up in logs and history, to save a fetch.
 
 ## Security
 
@@ -370,12 +418,6 @@ Geocoding now exists, so the remaining blocker is data: a similarity threshold
 needs ~50 real links before it can be tuned. Do not build against a handful of
 rows.
 
-### 4. `link_photos` table
-
-`photo_file_id` holds a comma-separated list of Telegram file_ids — a
-denormalised shortcut that only works because nothing renders more than one
-image. Migrate before the Mini App shows multiple photos per link.
-
 ## Out of scope
 
 - No auto-scraping of TikTok/Instagram/Lemon8 feeds or hashtags. Only links the
@@ -402,6 +444,18 @@ security boundary — say so explicitly rather than leaving it to be discovered.
 settings and hardcoding it anyway, say which value, why it is hardcoded, and
 what it would take to expose it. Silent hardcoding is how an app becomes one
 only its author can change.
+
+Constants introduced with photos, and why each stayed one:
+
+- `MAX_UPLOAD_BYTES` (10MB, `app/api.py`) — Telegram's own `sendPhoto` ceiling.
+  Raising it would only move the rejection to Telegram with a worse message.
+- `PREVIEW_MIN_WIDTH` (320px, `app/handlers/link_handler.py`) — which of
+  Telegram's photo sizes to keep as the card thumbnail. A rendering detail with
+  no user-visible meaning; exposing it would be a setting nobody could reason
+  about.
+- Three thumbnails per card (`thumbsHtml` in `miniapp/app.js`) — the weakest of
+  the three. It is a taste call about card density, not a constraint. If the
+  couple ever wants more, it belongs in settings alongside stops-per-plan.
 
 ## Conventions
 
