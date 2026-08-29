@@ -24,15 +24,17 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from app.db.database import (
-    add_photo_file_ids,
+    PHOTO_INTAKE,
+    PHOTO_VISIT,
+    add_link_photos,
     find_link_by_canonical_url,
     find_link_by_url,
     get_link,
     insert_link,
     is_day_trip,
+    list_link_photos,
     save_caption_parse,
     save_geocode,
-    split_file_ids,
 )
 from app.services.caption_parser import parse_caption_async
 from app.services.geocoder import geocode
@@ -79,6 +81,18 @@ MAX_IMAGES_PER_POST = 6
 # adding the slide and re-reading the post.
 ADD_PHOTO_MARKER = re.compile(r"(?:^|\s)(?:/addphoto|\+photo)(?:\s|$)", re.IGNORECASE)
 
+# The other kind of photo. A screenshot of the post is data the parser reads;
+# a picture taken on the day is a memory. Same message shape, opposite meaning,
+# so the caption has to say which - and this marker is the escape hatch that
+# keeps a holiday snap out of the model's input.
+VISIT_PHOTO_MARKER = re.compile(r"(?:^|\s)(?:/visit|\+visit)(?:\s|$)", re.IGNORECASE)
+
+# Telegram offers several sizes of every photo. The largest is what the parser
+# should read - text overlays on a menu are small - but a card preview wants
+# something far lighter, so a mid-size id is stored alongside it. Both are
+# ids, not bytes; Telegram re-serves either on demand.
+PREVIEW_MIN_WIDTH = 320
+
 # Buffered album messages, keyed by (chat_id, media_group_id). Handlers run
 # sequentially by default, so a plain dict needs no lock.
 _pending_media_groups: dict[tuple[int, str], dict] = {}
@@ -116,15 +130,28 @@ def _describe(url: str, platform: str) -> str:
     return f"{_platform_label(platform)} - {url}"
 
 
-def _photo_file_id(message) -> str | None:
-    """Largest available size of a photo message, or None."""
+def photo_sizes(message) -> tuple[str, str | None] | None:
+    """(full-size file_id, preview file_id) for a photo message, or None.
+
+    Telegram orders sizes smallest to largest. The parser gets the largest,
+    because a menu's prices are unreadable at thumbnail scale. The preview is
+    the smallest size still wide enough to fill a card, so browsing the Mini
+    App on mobile data does not pull full-resolution screenshots; None when
+    Telegram offered nothing bigger than a tiny thumbnail, and callers then
+    fall back to the full size.
+    """
     photos = getattr(message, "photo", None)
     if not photos:
         return None
-    return photos[-1].file_id  # Telegram orders sizes smallest to largest.
+    full = photos[-1].file_id
+    preview = next(
+        (p.file_id for p in photos if getattr(p, "width", 0) >= PREVIEW_MIN_WIDTH),
+        None,
+    )
+    return full, (preview if preview != full else None)
 
 
-async def _download_images(context, file_ids: list[str]) -> list[bytes]:
+async def _download_images(context, photos: list[tuple[str, str | None]]) -> list[bytes]:
     """Fetch image bytes for the parse.
 
     Only file_ids are persisted - Telegram re-serves the images on demand - so
@@ -133,6 +160,8 @@ async def _download_images(context, file_ids: list[str]) -> list[bytes]:
     post.
     """
     images: list[bytes] = []
+    # The full-size id, not the preview: the parser is reading text off a menu.
+    file_ids = [full for full, _ in photos]
     for file_id in file_ids[:MAX_IMAGES_PER_POST]:
         try:
             telegram_file = await context.bot.get_file(file_id)
@@ -158,13 +187,13 @@ async def _flush_media_group(context) -> None:
     if not pending:
         return
 
-    file_ids = pending["file_ids"]
+    photos = pending["photos"]
     caption = pending["caption"]
     message = pending["message"]
     logger.info(
         "media group %s complete: %d photo(s), caption=%r",
         key[1],
-        len(file_ids),
+        len(photos),
         (caption or "")[:80],
     )
 
@@ -173,7 +202,7 @@ async def _flush_media_group(context) -> None:
         logger.info("media group %s has no supported link; ignoring", key[1])
         return
 
-    await _run_intake(context, message, caption or "", file_ids)
+    await _run_intake(context, message, caption or "", photos)
 
 
 async def _buffer_media_group(context, message) -> None:
@@ -183,15 +212,15 @@ async def _buffer_media_group(context, message) -> None:
     buffered and the caption taken from whichever has it.
     """
     key = (message.chat.id, message.media_group_id)
-    file_id = _photo_file_id(message)
+    sizes = photo_sizes(message)
     pending = _pending_media_groups.get(key)
 
     if pending is None:
-        pending = {"file_ids": [], "caption": None, "message": message, "job": None}
+        pending = {"photos": [], "caption": None, "message": message, "job": None}
         _pending_media_groups[key] = pending
 
-    if file_id and file_id not in pending["file_ids"]:
-        pending["file_ids"].append(file_id)
+    if sizes and sizes[0] not in {full for full, _ in pending["photos"]}:
+        pending["photos"].append(sizes)
     caption = (message.caption or "").strip()
     if caption and not pending["caption"]:
         pending["caption"] = caption
@@ -205,7 +234,7 @@ async def _buffer_media_group(context, message) -> None:
         _flush_media_group, MEDIA_GROUP_DEBOUNCE_SECONDS, data=key
     )
     logger.debug(
-        "buffered media group %s (%d photo(s) so far)", key[1], len(pending["file_ids"])
+        "buffered media group %s (%d photo(s) so far)", key[1], len(pending["photos"])
     )
 
 
@@ -278,8 +307,20 @@ async def _parse_and_store(
     return parsed
 
 
+def _attach_visit_photos(db_path, link_id: int, photos, added_by) -> int:
+    """Store photos from the day against a link already saved.
+
+    Deliberately does none of what an intake screenshot triggers: no download,
+    no vision call, no re-parse, no quota. It is a scrapbook, not a source.
+    """
+    added = add_link_photos(
+        db_path, link_id, photos, kind=PHOTO_VISIT, added_by=added_by
+    )
+    return len(added)
+
+
 async def _enrich_existing(
-    context, db_path, existing_id: int, platform: str, file_ids, images, force: bool
+    context, db_path, existing_id: int, platform: str, photos, images, force: bool, added_by=None
 ):
     """Use screenshots to fill in a link that was already saved.
 
@@ -296,7 +337,9 @@ async def _enrich_existing(
     if row is None:
         return None
 
-    already = split_file_ids(row["photo_file_id"])
+    # Intake screenshots only. A visit photo is not a source the parser has
+    # already read, so it must not make a link look like it has been enriched.
+    already = list_link_photos(db_path, existing_id, kind=PHOTO_INTAKE)
     if already and not force:
         logger.info(
             "link id=%s already has %d screenshot(s); not re-parsing (use +photo to force)",
@@ -305,7 +348,9 @@ async def _enrich_existing(
         )
         return None
 
-    added = add_photo_file_ids(db_path, existing_id, file_ids)
+    added = add_link_photos(
+        db_path, existing_id, photos, kind=PHOTO_INTAKE, added_by=added_by
+    )
     if not added and already:
         # The same screenshot again: nothing new to read.
         logger.info("link id=%s got no new screenshots; not re-parsing", existing_id)
@@ -430,21 +475,21 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     text = message.text or message.caption or ""
-    file_id = _photo_file_id(message)
+    sizes = photo_sizes(message)
     if not extract_links(text):
         # A lone photo with no link: the filter admits photos so album members
         # without captions can be buffered, so this is the expected non-match.
         logger.debug("message_id=%s has no supported link; ignoring", message.message_id)
         return
 
-    await _run_intake(context, message, text, [file_id] if file_id else [])
+    await _run_intake(context, message, text, [sizes] if sizes else [])
 
 
 async def _run_intake(
     context: ContextTypes.DEFAULT_TYPE,
     message,
     text: str,
-    photo_file_ids: list[str],
+    photos: list[tuple[str, str | None]],
 ) -> None:
     """Store every supported link and confirm what was saved."""
     db_path = context.bot_data["db_path"]
@@ -457,7 +502,7 @@ async def _run_intake(
         message.message_id,
         added_by,
         user.first_name if user else "unknown",
-        len(photo_file_ids),
+        len(photos),
     )
     logger.debug("message text: %r", text)
 
@@ -466,6 +511,16 @@ async def _run_intake(
     force_add = bool(ADD_PHOTO_MARKER.search(text))
     if force_add:
         logger.info("caption carries the add-photo marker; forcing re-read")
+
+    # +visit changes what the photos ARE, not just where they go. A memory is
+    # not evidence about the post, so it is never downloaded, never shown to
+    # Gemini, and never counts as the link having been enriched.
+    photo_kind = PHOTO_VISIT if VISIT_PHOTO_MARKER.search(text) else PHOTO_INTAKE
+    if photo_kind == PHOTO_VISIT:
+        logger.info(
+            "caption carries the visit marker; %d photo(s) stored as memories, not parsed",
+            len(photos),
+        )
 
     links = extract_links(text)
     if not links:
@@ -482,6 +537,7 @@ async def _run_intake(
 
     saved: list[str] = []
     updated: list[str] = []
+    visited: list[str] = []
     duplicates: list[str] = []
     failed: list[str] = []
 
@@ -494,7 +550,11 @@ async def _run_intake(
 
     # Screenshots sent with the URL in the caption are how photo/slideshow
     # posts get their content to us, since yt-dlp cannot read them.
-    images = await _download_images(context, photo_file_ids) if photo_file_ids else []
+    images = (
+        await _download_images(context, photos)
+        if photos and photo_kind == PHOTO_INTAKE
+        else []
+    )
 
     for url, platform in links:
         try:
@@ -507,8 +567,20 @@ async def _run_intake(
                     existing["id"],
                     existing["added_at"],
                 )
+                if photo_kind == PHOTO_VISIT:
+                    count = _attach_visit_photos(
+                        db_path, existing["id"], photos, added_by
+                    )
+                    if count:
+                        visited.append(
+                            f"  #{existing['id']} {_platform_label(platform)} - "
+                            f"{count} photo{'s' if count != 1 else ''} from your visit"
+                        )
+                    else:
+                        duplicates.append(f"  #{existing['id']} {_describe(url, platform)}")
+                    continue
                 enriched = await _enrich_existing(
-                    context, db_path, existing["id"], platform, photo_file_ids, images, force_add
+                    context, db_path, existing["id"], platform, photos, images, force_add, added_by
                 )
                 if enriched:
                     updated.append(_summarise_enriched(existing["id"], platform, enriched))
@@ -531,10 +603,25 @@ async def _run_intake(
                         existing["id"],
                         existing["url"],
                     )
+                    if photo_kind == PHOTO_VISIT:
+                        count = _attach_visit_photos(
+                            db_path, existing["id"], photos, added_by
+                        )
+                        if count:
+                            visited.append(
+                                f"  #{existing['id']} {_platform_label(platform)} - "
+                                f"{count} photo{'s' if count != 1 else ''} from your visit"
+                            )
+                        else:
+                            duplicates.append(
+                                f"  #{existing['id']} {_platform_label(platform)} - "
+                                f"same post as {existing['url']}"
+                            )
+                        continue
                     # A screenshot for a link we already hold is the point of
                     # the photo workflow, not a duplicate to discard.
                     enriched = await _enrich_existing(
-                        context, db_path, existing["id"], platform, photo_file_ids, images, force_add
+                        context, db_path, existing["id"], platform, photos, images, force_add, added_by
                     )
                     if enriched:
                         updated.append(_summarise_enriched(existing["id"], platform, enriched))
@@ -554,8 +641,11 @@ async def _run_intake(
                 title=metadata.title,
                 caption=metadata.caption,
                 location=metadata.location,
-                photo_file_id=",".join(photo_file_ids) or None,
             )
+            if photos:
+                add_link_photos(
+                    db_path, link_id, photos, kind=photo_kind, added_by=added_by
+                )
             # Caption parse runs once, here at intake, and the result is cached
             # on the row. Planning never re-parses. A screenshot rides along in
             # that same call rather than costing a second one.
@@ -580,6 +670,9 @@ async def _run_intake(
     if updated:
         lines.append(f"Updated from your screenshot ({len(updated)}):")
         lines.extend(updated)
+    if visited:
+        lines.append(f"Saved to your memories ({len(visited)}):")
+        lines.extend(visited)
     if duplicates:
         lines.append(f"Already saved ({len(duplicates)}):")
         lines.extend(duplicates)
@@ -592,10 +685,12 @@ async def _run_intake(
 
     reply = "\n".join(lines)
     logger.info(
-        "intake result for message_id=%s: saved=%d updated=%d duplicate=%d failed=%d",
+        "intake result for message_id=%s: saved=%d updated=%d visit=%d "
+        "duplicate=%d failed=%d",
         message.message_id,
         len(saved),
         len(updated),
+        len(visited),
         len(duplicates),
         len(failed),
     )
