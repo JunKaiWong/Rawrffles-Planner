@@ -10,9 +10,7 @@ itinerary from what you've saved.
 
 Runs entirely on free tiers.
 
-![The Mini App's main list: countdown banner, tabs, filters, and saved links with location, dates, category and tags](docs/images/default_page.png)
-*Screenshots are from a desktop browser during development; in normal use the
-Mini App opens full-screen inside Telegram on a phone.*
+![The Mini App open in Telegram on a phone, in dark mode: the countdown banner clear of the Close button, tab row, category filters, Plan with all / Select / Add place, and saved links showing platform, location, dates, category, tags and a screenshot thumbnail](docs/images/default_page.jpg)
 
 ## Why
 
@@ -34,7 +32,9 @@ that only ever suggests places you actually chose.
   otherwise nothing to notice
 - **Mini App** — To visit / Day trips / Done / Calendar / Settings tabs,
   category and tag filters, ratings out of 10, and notes. Laid out for a phone
-  first, since that is where Telegram opens it
+  first, since that is where Telegram opens it, and offset by the safe area
+  insets the client reports rather than a measured constant, so the Close
+  button and the home indicator never cover anything
 - **Manual entries** — add a place you tried without a link: name, location,
   category, tags, rating and photos, straight into Done if you have already
   been. Geocoded like any link, so the planner can use it
@@ -66,7 +66,7 @@ back to a saved link or a real search result, and anything discovered nearby is
 labelled as a suggestion rather than presented as something you'd already
 picked.
 
-![A generated plan: summary, three timed stops with addresses and reasons, and a Post to group button](docs/images/planner.png)
+![A generated plan: a one-line summary, three timed stops each with an address, a reason and a link back to the post it came from, a note about how far apart they are, and a Post to group button](docs/images/planner.jpg)
 
 ## Architecture
 
@@ -135,7 +135,9 @@ wait until then.
 
 A place added by hand enters at the geocoding step. Its fields were typed, so
 there is nothing to extract and no model call to make; it is otherwise an
-ordinary row, and the planner cannot tell the difference.
+ordinary row, and the planner cannot tell the difference. An entry marked as a
+collection skips geocoding as well — there is no single point to resolve — and
+is excluded from planning by name rather than by having no coordinates.
 
 ## Stack
 
