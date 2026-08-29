@@ -286,6 +286,7 @@ body {
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 0 16px 12px;
   position: sticky;
@@ -327,6 +328,7 @@ body {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 0 16px 12px;
 }
@@ -1144,10 +1146,36 @@ body {
   resize: vertical;
 }
 
+/* minmax(0, 1fr) rather than 1fr: a grid item's default min-width is auto, so
+   ten columns each refused to shrink below their own content and the row
+   overflowed the sheet on a phone. */
 .rating {
   display: grid;
-  grid-template-columns: repeat(10, 1fr);
+  grid-template-columns: repeat(10, minmax(0, 1fr));
   gap: 4px;
+}
+
+/* Ten across fits on a phone, but only at ~31px per button, which is well
+   under a comfortable thumb target. Two rows of five gives roughly double the
+   width at the cost of one row of height, in a sheet that has the room. */
+@media (max-width: 420px) {
+  .rating {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  /* iOS - which includes Telegram's webview there - zooms the page when a
+     focused input's text is under 16px, and does not zoom back out. The page
+     is then wider than the screen and scrolls sideways, which reads as a
+     broken layout rather than as a zoom. The body's 15px is fine everywhere
+     else; only the fields you type into need the bump. */
+  .field__input,
+  .settings__input,
+  input[type="text"],
+  input[type="number"],
+  input[type="date"],
+  textarea {
+    font-size: 16px;
+  }
 }
 
 .rating__btn {
