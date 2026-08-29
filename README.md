@@ -163,6 +163,31 @@ shaped these choices.
 Local development defaults to polling; production uses webhooks, selected via
 `TELEGRAM_TRANSPORT`. Never run both against the same bot token.
 
+## Limitations
+
+**Photo posts can't be extracted.** TikTok slideshows and Instagram carousel
+(`/p/`) posts expose no caption or metadata to any of the extraction paths.
+These need a screenshot: send the informative slide to the group with the post
+URL in the photo's caption, and the vision path reads it. Scraping the slide
+images is deliberately not done — it's fragile and most slides are irrelevant.
+
+**yt-dlp breaks when platforms change their internals.** It scrapes, so
+extraction failures are periodic and often intermittent — the same URL can fail
+and then succeed twenty minutes later. TikTok's oEmbed API is a published
+endpoint and covers most of what breaks; the screenshot path covers the rest.
+A weekly job upgrades yt-dlp and retries links it previously couldn't read.
+
+**Events come only from saved links.** There is no free source of Singapore
+event data. Eventbrite's public search endpoint was withdrawn, Ticketmaster's
+coverage omits Singapore, and data.gov.sg publishes downloadable datasets
+rather than a location query. OneMap's thematic layers fill gaps with real
+nearby *venues*, so a plan can suggest a place that exists but never an event
+that isn't already in the list.
+
+**Cold starts.** Render's free tier sleeps after about fifteen minutes idle and
+takes roughly a minute to wake. An uptime monitor keeps it warm most of the
+time, but a deploy or a missed ping means the first message after it waits.
+
 ## Scope
 
 This project only processes URLs its two users paste themselves. It does not
