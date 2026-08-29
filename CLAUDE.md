@@ -315,15 +315,25 @@ happen.
 - photos — rows in `link_photos` with `kind='visit'`, never image bytes
 
 Photos reach a link two ways, both landing in the same rows: the Mini App's
-done sheet, and a `+visit` caption in the group. They upload as they are
-picked rather than on Save, because the upload relays through Telegram and
-would otherwise make Save look stuck.
+done sheet, and a `+visit` caption in the group. They upload as they are picked
+rather than on Save, because downscaling and sending takes a moment on a phone
+and would otherwise make Save look stuck.
 
-**An upload posts the photo to the group.** That is forced, not chosen: the Bot
-API mints a `file_id` only by sending the photo somewhere, and `file_id`s are
-what this app stores instead of bytes — which matters on a host with no
-persistent disk. The done sheet says so on the field label rather than
-surprising anyone.
+**An upload posts nothing to the group.** An earlier version relayed each photo
+through the bot to obtain a `file_id`, since sending it somewhere is the only
+way the Bot API mints one. That put the couple's own photos into their chat as a
+side effect of how storage worked, and it was wrong: the bot carries intake and
+notifications, never content they did not send themselves.
+
+So an uploaded photo is stored as **bytes**, in `link_photos.image_data`. This
+looks like a violation of "store file_ids, never images" and is not: that rule's
+premise is that Telegram already holds the picture and re-serves it free. An
+upload has never been near Telegram, so there is nothing to point at.
+
+Bytes cost database, and Neon's free tier is 0.5GB, so the Mini App downscales
+in a canvas before sending — 1600px on the long edge, JPEG quality 0.85. A
+3000×2000 photo lands at about 27KB. The server's 4MB cap is a backstop for the
+path where a browser cannot downscale, not the normal case.
 
 ## Database
 
@@ -332,10 +342,21 @@ added_at, parsed_at, done, done_at, done_by, rating, note, photo_file_id,
 event_start, event_end, is_evergreen, location, region, lat, lng, geocoded_at,
 geocode_status, category, subcategory)`
 
-`link_photos(id, link_id, file_id, thumb_file_id, kind, added_by, added_at)`
-— `kind` is `intake` | `visit`; `file_id` is the largest size Telegram offers
-(what the parser reads), `thumb_file_id` a smaller one for card previews,
-NULL when none was offered, in which case reads fall back to `file_id`.
+`link_photos(id, link_id, file_id, thumb_file_id, image_data, content_type,
+digest, kind, added_by, added_at)` — `kind` is `intake` | `visit`.
+
+A photo has exactly one source, and which one depends on how it arrived.
+`file_id` means Telegram holds the image because it was sent to the group: every
+intake screenshot, and any `+visit` photo. `image_data` means it was uploaded
+from the Mini App and has never touched Telegram. `file_id` is therefore
+nullable, and reads check for stored bytes first.
+
+`file_id` is the largest size Telegram offers (what the parser reads);
+`thumb_file_id` a smaller one for card previews, NULL when none was offered, in
+which case reads fall back to `file_id`. An uploaded photo has no thumbnail —
+it was downscaled before it arrived, so it is already preview-sized. `digest` is
+the SHA-256 of an uploaded image and exists only so picking the same photo twice
+is a no-op, the way an identical `file_id` already is.
 
 `dates(id, label, date, recurring, recurrence, reminder_days)` ·
 `availability(id, user_id, day, slot, available, note, author_name,
@@ -447,8 +468,12 @@ only its author can change.
 
 Constants introduced with photos, and why each stayed one:
 
-- `MAX_UPLOAD_BYTES` (10MB, `app/api.py`) — Telegram's own `sendPhoto` ceiling.
-  Raising it would only move the rejection to Telegram with a worse message.
+- `MAX_UPLOAD_BYTES` (4MB, `app/api.py`) — a guard on the database rather than
+  a preference. Uploaded photos are stored as bytes and Neon's free tier is
+  0.5GB, so an unbounded upload is the one thing that could actually fill it.
+- `PHOTO_MAX_EDGE` / `PHOTO_QUALITY` (1600px, 0.85, `miniapp/app.js`) — how far
+  an upload is downscaled before sending. Chosen against what the viewer can
+  show on a phone and the storage budget above, not as a taste call.
 - `PREVIEW_MIN_WIDTH` (320px, `app/handlers/link_handler.py`) — which of
   Telegram's photo sizes to keep as the card thumbnail. A rendering detail with
   no user-visible meaning; exposing it would be a setting nobody could reason
@@ -456,6 +481,27 @@ Constants introduced with photos, and why each stayed one:
 - Three thumbnails per card (`thumbsHtml` in `miniapp/app.js`) — the weakest of
   the three. It is a taste call about card density, not a constraint. If the
   couple ever wants more, it belongs in settings alongside stops-per-plan.
+
+## The Mini App is a phone app first
+
+It is opened from a Telegram group on a phone, so a layout that only works on a
+desktop browser is broken, not merely imperfect. Two failures are worth naming
+because both were shipped once:
+
+- **A row that cannot shrink.** `grid-template-columns: repeat(10, 1fr)` looks
+  responsive and is not: a grid item's default `min-width` is `auto`, so ten
+  rating buttons refused to go below their own content width and the row
+  overflowed the sheet. Use `minmax(0, 1fr)`, and where ten across would leave
+  targets too small to hit with a thumb, wrap to two rows instead.
+- **Inputs under 16px.** iOS — which includes Telegram's webview there — zooms
+  the page when a focused input's text is smaller than 16px, and does not zoom
+  back out. The page is then wider than the screen and scrolls sideways, which
+  reads as a broken layout rather than as a zoom.
+
+Check changes at 320px as well as 390px, and check the dialogs, not just the
+list: the done, date, day and plan sheets are all easy to leave overflowing
+because they are usually opened on a desktop while developing. The screenshots
+in the README are from a desktop browser and prove nothing about this.
 
 ## Conventions
 
