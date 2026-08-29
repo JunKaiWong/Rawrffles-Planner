@@ -51,6 +51,8 @@ from app.db.database import (
     add_date,
     add_uploaded_photo,
     claim_update,
+    create_manual_link,
+    delete_link_photo,
     delete_date,
     get_date,
     get_link,
@@ -67,6 +69,7 @@ from app.db.database import (
     read_link_photo_bytes,
     release_update,
     save_calendar_note,
+    save_geocode,
     save_plan,
     set_setting,
     update_date,
@@ -74,6 +77,8 @@ from app.db.database import (
 )
 from app.handlers.plan_handler import next_saturday
 from app.services import appsettings as app_settings
+from app.services.caption_parser import CATEGORIES, SUBCATEGORIES
+from app.services.geocoder import AMBIGUOUS, NOT_FOUND, geocode
 from app.services.planner import plan_date
 from app.services.reminders import (
     AVAILABLE_MILESTONES,
@@ -140,12 +145,17 @@ class LinkOut(BaseModel):
     """A stored link as the Mini App sees it."""
 
     id: int
-    url: str
+    # NULL for a manual entry - a place tried without a post behind it. The
+    # Mini App keys its "Open" button off this rather than off a type flag.
+    url: str | None = None
     canonical_url: str | None = None
-    platform: str
+    platform: str | None = None
     title: str | None = None
     caption: str | None = None
     location: str | None = None
+    # Lookup-only, never rendered on a card. Exposed because the edit dialog
+    # has to show and change it.
+    geocode_hint: str | None = None
     region: str | None = None
     category: str | None = None
     subcategory: str | None = None
@@ -157,6 +167,11 @@ class LinkOut(BaseModel):
     # True when the link is outside the home region: kept and browsable, but
     # excluded from MRT-based Saturday clustering.
     is_day_trip: bool = False
+    # True when geocoding ran and could not place it. Such a link is silently
+    # dropped from every plan, so the Mini App badges it rather than leaving
+    # the exclusion to be discovered by a plan that quietly omits it. Derived
+    # here so the rule lives in one place.
+    needs_location: bool = False
     parsed_at: str | None = None
     # Stored comma-separated in SQLite; exposed as a list so clients never
     # re-implement the split.
@@ -176,6 +191,71 @@ class LinkOut(BaseModel):
     event_start: str | None = None
     event_end: str | None = None
     is_evergreen: bool
+
+
+def _check_taxonomy(category: str | None, subcategory: str | None) -> None:
+    """Reject a category or pair the closed set does not contain.
+
+    The same list the model is held to, applied to hand-typed entries: a
+    free-form category fragments the filters just as fast whether a person or
+    an LLM invented it.
+    """
+    if category is not None and category not in CATEGORIES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"category must be one of {', '.join(CATEGORIES)}",
+        )
+    if subcategory is None:
+        return
+    allowed = SUBCATEGORIES.get(category or "", ())
+    if subcategory not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"subcategory {subcategory!r} does not belong to category "
+                f"{category!r}; allowed: {', '.join(allowed) or 'none'}"
+            ),
+        )
+
+
+def _tags_for_storage(tags: list[str] | None) -> str | None:
+    """Join tags for the comma-separated column, or None to leave it alone."""
+    if tags is None:
+        return None
+    cleaned = [tag.strip() for tag in tags if tag and tag.strip()]
+    if any("," in tag for tag in cleaned):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="a tag cannot contain a comma; the column is comma-separated",
+        )
+    return ",".join(cleaned)
+
+
+class ManualLinkIn(BaseModel):
+    """A place tried without a link.
+
+    Nothing here is parsed: the fields are typed directly, so there is nothing
+    to extract and no model call to make. `done` with a rating is the common
+    case - these are usually added after the visit, not before it.
+    """
+
+    title: str = Field(min_length=1, max_length=200)
+    location: str | None = Field(
+        default=None,
+        max_length=300,
+        description="Full human-readable address, shown on the card.",
+    )
+    geocode_hint: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Lookup-only address. Never displayed.",
+    )
+    category: str | None = None
+    subcategory: str | None = None
+    tags: list[str] = []
+    note: str | None = Field(default=None, max_length=500)
+    rating: int | None = Field(default=None, ge=1, le=10)
+    done: bool = False
 
 
 class PhotoOut(BaseModel):
@@ -332,9 +412,29 @@ class PlanOut(BaseModel):
     warnings: list[str] = []
 
 
-class LinkUpdate(BaseModel):
+class _LinkPatchExtra(BaseModel):
+    """Fields the edit dialog can correct on any entry, manual or parsed.
+
+    A parsed title or location is occasionally wrong, and correcting it beats
+    re-sending the link and hoping for a better parse. Coordinates are not here:
+    they are geocoding's output, re-derived when the location or hint changes.
+    """
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    location: str | None = Field(default=None, max_length=300)
+    geocode_hint: str | None = Field(default=None, max_length=200)
+    category: str | None = None
+    subcategory: str | None = None
+    tags: list[str] | None = None
+
+
+class LinkUpdate(_LinkPatchExtra):
     """Partial update. Omitted fields are left untouched; sending null clears
-    a field."""
+    a field.
+
+    Inherits the correctable descriptive fields from _LinkPatchExtra; the
+    done-flow fields are below.
+    """
 
     done: bool | None = Field(
         default=None,
@@ -380,9 +480,35 @@ def _row_to_link(
     # Derived server-side so the rule lives in one place rather than being
     # re-implemented by every client.
     data["is_day_trip"] = is_day_trip(data.get("region"), home_region)
+    # Geocoding ran and could not place it, so the planner will drop it without
+    # saying so. Derived here rather than in the client, next to the rule it
+    # belongs with.
+    data["needs_location"] = data.get("geocode_status") in (AMBIGUOUS, NOT_FOUND)
     raw_tags = data.get("tags") or ""
     data["tags"] = [tag for tag in (t.strip() for t in raw_tags.split(",")) if tag]
     return LinkOut(**data)
+
+
+def _geocode_link(db_path, link_id: int, row) -> None:
+    """Resolve a link's location and record the outcome. Never raises.
+
+    The hint wins when there is one. `location` is written for a human to read
+    - outlet name, unit number, "Singapore 270020" - and those are exactly the
+    parts that make OneMap miss, so the hint exists to be looked up instead
+    without degrading what is displayed.
+
+    Blocking HTTP, so callers hand it to a thread.
+    """
+    data = dict(row)
+    query = (data.get("geocode_hint") or "").strip() or data.get("location")
+    try:
+        located = geocode(query, data.get("region"))
+        save_geocode(
+            db_path, link_id, status=located.status, lat=located.lat, lng=located.lng
+        )
+    except Exception:
+        # A geocoding failure must not lose the entry that was just saved.
+        logger.exception("geocoding failed for id=%s", link_id)
 
 
 def _valid_date(value: str) -> None:
@@ -390,7 +516,7 @@ def _valid_date(value: str) -> None:
         date.fromisoformat(value)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="date must be a real calendar date, YYYY-MM-DD",
         ) from None
 
@@ -402,7 +528,7 @@ def _milestones_for_storage(milestones: list[int] | None) -> str | None:
     invalid = [m for m in milestones if m not in AVAILABLE_MILESTONES]
     if invalid:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"unsupported milestone(s) {invalid}; choose from {list(AVAILABLE_MILESTONES)}",
         )
     return format_milestones(milestones)
@@ -721,7 +847,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         year, month_number = (int(part) for part in month.split("-"))
         if not 1 <= month_number <= 12:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="month must be between 01 and 12",
             )
         last_day = monthrange(year, month_number)[1]
@@ -759,7 +885,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         year, month_number = (int(part) for part in month.split("-"))
         if not 1 <= month_number <= 12:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="month must be between 01 and 12",
             )
         rows = await asyncio.to_thread(list_dates, settings.db_path)
@@ -784,7 +910,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             date.fromisoformat(day)
         except ValueError:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="day must be a real date, YYYY-MM-DD",
             ) from None
 
@@ -835,7 +961,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if not plan.ok:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"error": plan.error, "excluded": plan.excluded},
             )
 
@@ -1021,6 +1147,95 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for row in rows
         ]
 
+    @app.get(
+        "/api/taxonomy",
+        tags=["links"],
+        summary="The closed category list",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def read_taxonomy(
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> dict[str, object]:
+        """Served rather than duplicated in the Mini App.
+
+        The categories are closed precisely so they cannot fragment; a second
+        copy in JavaScript is how they would start to.
+        """
+        return {"categories": list(CATEGORIES), "subcategories": {k: list(v) for k, v in SUBCATEGORIES.items()}}
+
+    @app.post(
+        "/api/links",
+        response_model=LinkOut,
+        status_code=status.HTTP_201_CREATED,
+        tags=["links"],
+        summary="Add a place by hand, with no link behind it",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def create_link(
+        payload: ManualLinkIn,
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> LinkOut:
+        """Store a place tried without a post.
+
+        No model call: every field was typed, so there is nothing to extract
+        and no quota to spend. Geocoding still runs, because the planner needs
+        coordinates and a manual entry should be as plannable as any link.
+        """
+        _check_taxonomy(payload.category, payload.subcategory)
+
+        link_id = await asyncio.to_thread(
+            create_manual_link,
+            settings.db_path,
+            user.id,
+            payload.title.strip(),
+            (payload.location or "").strip() or None,
+            (payload.geocode_hint or "").strip() or None,
+            payload.category,
+            payload.subcategory,
+            _tags_for_storage(payload.tags),
+            (payload.note or "").strip() or None,
+            payload.rating,
+            payload.done,
+        )
+
+        row = await asyncio.to_thread(get_link, settings.db_path, link_id)
+        if payload.location or payload.geocode_hint:
+            await asyncio.to_thread(_geocode_link, settings.db_path, link_id, row)
+            row = await asyncio.to_thread(get_link, settings.db_path, link_id)
+
+        home = app_settings.load(settings.db_path).home_region
+        logger.info("user %s added manual entry %s", user.id, link_id)
+        return _row_to_link(row, home, list_link_photos(settings.db_path, link_id))
+
+    @app.delete(
+        "/api/links/{link_id}/photos/{photo_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["links"],
+        summary="Remove one photo from a link",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def remove_link_photo(
+        link_id: Annotated[int, PathParam(ge=1)],
+        photo_id: Annotated[int, PathParam(ge=1)],
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> Response:
+        """Delete a photo.
+
+        For an uploaded photo this destroys the only copy, since the bytes live
+        here. One sent to the group keeps its Telegram message - this removes
+        the app's reference to it, not the chat history.
+        """
+        deleted = await asyncio.to_thread(
+            delete_link_photo, settings.db_path, link_id, photo_id
+        )
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"photo {photo_id} not found on link {link_id}",
+            )
+        logger.info("user %s deleted photo %s from link %s", user.id, photo_id, link_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.patch(
         "/api/links/{link_id}",
         response_model=LinkOut,
@@ -1042,11 +1257,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="no fields to update",
             )
 
-        if get_link(settings.db_path, link_id) is None:
+        existing = get_link(settings.db_path, link_id)
+        if existing is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"link {link_id} not found",
             )
+
+        # A subcategory is only meaningful under its category, so validate the
+        # pair as it will end up, not just the half that was sent.
+        current = dict(existing)
+        if "category" in changes or "subcategory" in changes:
+            _check_taxonomy(
+                changes.get("category", current.get("category")),
+                changes.get("subcategory", current.get("subcategory")),
+            )
+        if "tags" in changes:
+            changes["tags"] = _tags_for_storage(changes["tags"])
+        for field in ("title", "location", "geocode_hint", "note"):
+            if isinstance(changes.get(field), str):
+                changes[field] = changes[field].strip() or None
 
         row = update_link(
             settings.db_path, link_id, changes, acting_user_id=user.id
@@ -1056,8 +1286,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"link {link_id} not found",
             )
+
+        # Coordinates are derived from these two, so a change to either makes
+        # the stored ones stale. Re-running here is also the whole point of the
+        # hint: you type one precisely because the last attempt failed.
+        moved = any(
+            field in changes and changes[field] != current.get(field)
+            for field in ("location", "geocode_hint")
+        )
+        if moved:
+            await asyncio.to_thread(_geocode_link, settings.db_path, link_id, row)
+            row = await asyncio.to_thread(get_link, settings.db_path, link_id)
+
+        home = app_settings.load(settings.db_path).home_region
         return _row_to_link(
-            row, photos=list_link_photos(settings.db_path, link_id)
+            row, home, list_link_photos(settings.db_path, link_id)
         )
 
     @app.get(
