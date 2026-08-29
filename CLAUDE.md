@@ -3,10 +3,12 @@
 A private Telegram bot for two people. Paste TikTok/Instagram links into a shared
 group chat; the bot extracts what they're about, categorises them, and stores
 them in a browsable Mini App. It tracks anniversaries and important dates, and
-(not yet built) proposes a Saturday date plan from saved links.
+proposes a date plan built from saved links.
 
 **The primary goal is a tidy, filterable store of saved posts.** The planner is
-secondary — it has been deferred repeatedly and that was correct each time.
+secondary — it was deferred repeatedly while the store was built out, and that
+was correct each time. It now works, but a thin plan is still a sign of too few
+saved links rather than a bug in the planner.
 
 ## Current status
 
@@ -21,11 +23,19 @@ users allowlisted, Mini App opening from the Telegram group.
 | Gemini parsing: title, location, dates, region, category, tags | Done |
 | Screenshot/vision path, incl. multi-slide albums | Done |
 | REST API with initData auth + user allowlist | Done |
-| Mini App: To visit / Done / Day trips, filters, rating + note | Done |
-| Anniversary countdowns + daily reminders | Done |
-| Geocoding (lat/lng) | **Not built** |
-| `plan_date()` — the planner | **Not built** |
-| Shared availability calendar | **Not built** |
+| Mini App: To visit / Day trips / Done / Calendar / Settings | Done |
+| Filters, rating + note | Done |
+| Anniversary + monthsary countdowns, daily reminders | Done |
+| Per-date reminder milestones, editable in the Mini App | Done |
+| Geocoding (lat/lng via OneMap search) | Done |
+| `plan_date()` — clustering, urgency tiers, grounded arrangement | Done |
+| OneMap venue gap-filling when saved links leave a hole | Done |
+| Shared calendar — month view, free-text notes, both users | Done |
+| In-app settings: stops per plan, nearby radius, home region | Done |
+| Webhook `update_id` dedup + bounded retry | Done |
+| `/health` answering GET and HEAD, for the uptime keep-alive | Done |
+| OneMap public-transport routing times | **Not built** |
+| Automatic Friday plan run | Built, deliberately not scheduled |
 | Same-venue grouping across posts | Deferred deliberately |
 
 ## Architecture
@@ -205,19 +215,78 @@ items. Never ask the LLM to prioritise — inconsistent and hard to debug.
 Expired links are filtered from planning input and dimmed in the Mini App, not
 deleted.
 
+## Geocoding
+
+OneMap's search endpoint (no auth) turns each link's `location` string into
+`lat`/`lng`. It runs **once per link, not once per plan**: `geocoded_at` marks
+the attempt and `geocode_status` records why it failed, because NULL
+coordinates plus a status is not the same thing as never having tried.
+
+Non-Singapore locations fail gracefully and keep their day-trip flag rather
+than taking the row down with them. Vague locations ("McDonald's") have no
+single correct answer, so they are handled rather than crashed on — a link
+without coordinates is unplannable, not broken, and stays browsable.
+
+## Planning
+
+`plan_date()` clusters candidates by proximity **in code** and computes urgency
+tiers **in code**, then hands the pre-grouped shortlist to Gemini to arrange.
+Deterministic work stays deterministic: clustering and prioritising inside the
+prompt is inconsistent and hard to debug.
+
+**Grounding rule — the LLM arranges and explains; it never originates a place
+name.** Every venue must trace back to a saved link or a real search result.
+The model will otherwise produce closed venues and plausible-sounding places
+that don't exist, and the failure is discovered in person, on the day. This is
+enforced structurally rather than by asking the model nicely: stops are
+rendered from database rows, and the surrounding prose is scrubbed for proper
+nouns that aren't in the candidate set.
+
+When saved links don't cover a gap, OneMap's thematic layers supply real nearby
+amenities as extra candidates, marked as suggestions so they read differently
+from something the couple actually chose. If no real candidate exists, say so.
+
+Two modes, one function: *manual* (Mini App multi-select → "Plan with these",
+or "Plan with all") and *auto* (a Friday job — written, not scheduled).
+Selection uses tap-to-select checkboxes, **not drag-and-drop** — drag fights
+the webview's own scroll and swipe gestures on mobile.
+
+A planning run makes several calls against a ~20/day/model ceiling. Budget for
+it. With few saved links, plans will legitimately be thin — that's a data
+shortage, not a bug.
+
 ## Reminders
 
-Milestone-based announcements at **30/14/7/3/1/0 days** out — not a rolling
-window. A reminder arriving every morning for a month gets muted, and a muted
-reminder is a deleted feature.
+Milestone-based announcements — not a rolling window. A reminder arriving every
+morning for a month gets muted, and a muted reminder is a deleted feature. The
+default milestones are **30/14/7/3/1/0 days** out, and `reminder_days` lets any
+single date override that from the Mini App.
 
-Recurring dates roll to next year once passed and carry an anniversary count
-("Together (6th)"). Past one-offs disappear. 29 February is observed on 28
-February in common years so it stays in its own month.
+Dates recur yearly (anniversaries), monthly (monthsaries), or not at all — a
+boolean could not express a monthsary, so `recurrence` carries the rule and the
+older `recurring` column is retained only as its source. Recurring dates roll
+forward once passed and carry a count ("Together (6th)"). Past one-offs
+disappear. 29 February is observed on 28 February in common years so it stays
+in its own month.
 
-The Mini App shows only the nearest date as a banner above the list. Dates load
-in parallel with links and fail independently — a dates problem must not leave
-the user staring at an empty list.
+The Mini App banner shows the nearest anniversary **and** the nearest
+monthsary. A monthsary is almost always the closer of the two, so showing only
+the nearest date hid the anniversary permanently. Dates load in parallel with
+links and fail independently — a dates problem must not leave the user staring
+at an empty list.
+
+## Shared calendar
+
+A month view in the Mini App, backed by the `availability` table. Entries are
+**plain text notes, not structured free/busy**: "gym then free after 8" carries
+more than a busy flag does. So `note` holds the text, `slot` is always `day`,
+and `available` goes unused. Both users see each other's entries, attributed by
+`author_name`.
+
+Anniversaries and monthsaries are drawn into the same grid, marked distinctly
+from typed notes and **read-only** — the Dates section stays the single source
+of truth, and the same date editable in two places is a divergence waiting to
+happen.
 
 ## The "Done" flow
 
@@ -229,16 +298,18 @@ the user staring at an empty list.
 ## Database
 
 `links(id, url, canonical_url, platform, caption, title, tags, added_by,
-added_at, parsed_at, source, done, done_at, done_by, rating, note,
-photo_file_id, event_start, event_end, is_evergreen, location, region, lat, lng,
-category, subcategory)`
+added_at, parsed_at, done, done_at, done_by, rating, note, photo_file_id,
+event_start, event_end, is_evergreen, location, region, lat, lng, geocoded_at,
+geocode_status, category, subcategory)`
 
-`dates(id, label, date, recurring)` · `availability(id, user_id, day, slot,
-available)` · `plans(id, week_of, summary, created_at)`
+`dates(id, label, date, recurring, recurrence, reminder_days)` ·
+`availability(id, user_id, day, slot, available, note, author_name,
+reminder_days)` · `settings(key, value, updated_at)` ·
+`processed_updates(update_id, seen_at, attempts, failed)` ·
+`plans(id, week_of, summary, created_at)`
 
-Note: `photo_file_id` currently holds a comma-separated list — a denormalised
-shortcut. A `link_photos` table is the clean version; migrate before the Mini
-App renders multiple images per link.
+Note: `photo_file_id` holds a comma-separated list rather than its own table —
+a known shortcut, tracked under Remaining work.
 
 ## Security
 
@@ -263,36 +334,26 @@ restricted in code, not just BotFather settings.
 
 ## Remaining work
 
-### 1. Geocoding (blocks the planner)
+### 1. OneMap public-transport routing
 
-OneMap search (no auth) turns each link's `location` string into `lat`/`lng`,
-stored once per link. Non-Singapore locations must fail gracefully and keep
-their day-trip flag. Vague locations ("McDonald's") have no single answer —
-handle rather than crash.
+Plans order stops by straight-line proximity without knowing how long the
+journey between them actually takes. OneMap's routing endpoint returns real MRT
+times, and the token client it needs is already built and caching. Pass those
+times into the prompt **as facts** rather than letting the model estimate
+travel — a fabricated "15 minutes away" is the same class of error as a
+fabricated venue.
 
-### 2. `plan_date()`
+Skipped deliberately when the planner was first built, to keep that version's
+call budget small.
 
-Cluster candidates by proximity **in code**, compute urgency tiers **in code**,
-then hand the pre-grouped shortlist to Gemini to arrange.
+### 2. Scheduling the automatic plan
 
-**Grounding rule — the LLM arranges and explains; it never originates a place
-name.** Every venue must trace back to a saved link or a real search result.
-The model will otherwise produce closed venues and plausible-sounding places
-that don't exist, and the failure is discovered in person. When links don't
-cover a gap, query OneMap's thematic layers for real nearby amenities and pass
-those as the candidate set. If no real candidate exists, say so.
-
-Then call OneMap public-transport routing for real MRT journey times and pass
-those into the prompt as facts.
-
-Two modes, one function: *manual* (multi-select in the Mini App → "Plan with
-these") and *auto* (Friday job picks top-scoring unexpired links). Use
-tap-to-select checkboxes, **not drag-and-drop** — drag fights the webview's own
-scroll and swipe gestures on mobile.
-
-A planning run makes several calls against a ~20/day/model ceiling. Budget for
-it. With few saved links, plans will legitimately be thin — that's a data
-shortage, not a bug.
+`app/jobs/weekly_plan.py` is written and runs, but nothing fires it — the
+Friday cron was left unwired on purpose so plans stay on demand while there are
+few saved links. Adding it to `.github/workflows/scheduled-jobs.yml` is the
+entire change. The open question is not how, but whether: an unattended weekly
+run spends several calls against the ~20/day/model ceiling whether or not
+anyone reads the result.
 
 ### 3. Same-venue grouping (deferred)
 
@@ -305,12 +366,15 @@ and the Mini App can stack them. Never auto-merge — chain outlets ("Cafe De
 Paris, Orchard" vs "…, Tampines") are different outings, and a silent merge
 destroys information without telling anyone.
 
-Needs geocoding first, and needs ~50 real links before a similarity threshold
-can be tuned. Do not build against a handful of rows.
+Geocoding now exists, so the remaining blocker is data: a similarity threshold
+needs ~50 real links before it can be tuned. Do not build against a handful of
+rows.
 
-### 4. Shared availability
+### 4. `link_photos` table
 
-Lightweight: inline-keyboard slot picking, or a Mini App calendar view.
+`photo_file_id` holds a comma-separated list of Telegram file_ids — a
+denormalised shortcut that only works because nothing renders more than one
+image. Migrate before the Mini App shows multiple photos per link.
 
 ## Out of scope
 

@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS links (
     region         TEXT,                      -- country, e.g. 'Singapore'
     category       TEXT,                      -- closed set: food|activity|place|other
     subcategory    TEXT,                      -- closed set, per category
-    lat            REAL,                      -- set by geocoding, not yet built
+    -- Set by geocoding. NULL means unresolved, and geocoded_at/geocode_status
+    -- (added by database._migrate) record whether it was ever attempted.
+    lat            REAL,
     lng            REAL,
     parsed_at      TEXT                       -- caption parse cache marker
 );
