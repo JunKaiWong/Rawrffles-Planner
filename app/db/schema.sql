@@ -94,3 +94,33 @@ CREATE TABLE IF NOT EXISTS plans (
     summary    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- Photos attached to a link, replacing the comma-separated links.photo_file_id
+-- column. That shortcut only worked while nothing rendered more than one image;
+-- the Mini App now shows them, so they need rows.
+--
+-- `kind` is the point of the table, not decoration:
+--   'intake' - a screenshot of the post itself, sent so the vision path can
+--              read a menu or a poster. Gemini reads these AS DATA.
+--   'visit'  - a photo taken on the day. A memory, never model input.
+-- Conflating the two would feed holiday snaps to the parser and offer the
+-- couple a screenshot of a menu as a souvenir, so the column is NOT NULL and
+-- every read filters on it.
+--
+-- file_id is the largest size Telegram offers (what the parser wants);
+-- thumb_file_id is a smaller size for card previews, NULL when none was
+-- offered, in which case callers fall back to file_id.
+CREATE TABLE IF NOT EXISTS link_photos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_id       INTEGER NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+    file_id       TEXT    NOT NULL,
+    thumb_file_id TEXT,
+    kind          TEXT    NOT NULL,       -- 'intake' | 'visit'
+    added_by      INTEGER,                -- NULL for rows migrated from photo_file_id
+    added_at      TEXT    NOT NULL
+);
+
+-- One row per image per link. Re-sending the same screenshot is a no-op rather
+-- than a second copy, which is what the old split-and-compare did in Python.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_link_photos_file ON link_photos (link_id, file_id);
+CREATE INDEX IF NOT EXISTS idx_link_photos_link ON link_photos (link_id, kind, id);

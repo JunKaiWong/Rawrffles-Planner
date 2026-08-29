@@ -27,7 +27,8 @@ from app.db.engine import connect, describe, is_postgres
 
 logger = logging.getLogger(__name__)
 
-TABLES = ("links", "dates", "availability", "plans")
+# link_photos comes after links: it references them.
+TABLES = ("links", "dates", "availability", "plans", "link_photos")
 
 # Columns copied for each table, named explicitly so a schema drift between the
 # two files fails loudly here rather than silently skipping data.
@@ -39,12 +40,18 @@ LINK_COLUMNS = (
 )
 TABLE_COLUMNS = {
     "links": LINK_COLUMNS,
+    # photo_file_id above is the legacy column, still copied so nothing is
+    # lost; these are the rows that replaced it.
+    "link_photos": (
+        "id", "link_id", "file_id", "thumb_file_id", "kind", "added_by", "added_at",
+    ),
     "dates": ("id", "label", "date", "recurring"),
     "availability": ("id", "user_id", "day", "slot", "available"),
     "plans": ("id", "week_of", "summary", "created_at"),
 }
 BOOLEAN_COLUMNS = {
     "links": {"done", "is_evergreen"},
+    "link_photos": set(),
     "dates": {"recurring"},
     "availability": {"available"},
     "plans": set(),
@@ -57,6 +64,17 @@ def _sqlite_rows(sqlite_path: Path, table: str) -> list[dict]:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
+        # A SQLite file written before link_photos existed simply has no such
+        # table. Its photos are in links.photo_file_id, which is copied with
+        # the links row and adopted by the backfill in init_db, so an absent
+        # table here means "nothing extra to copy", not a failed migration.
+        present = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if table not in present:
+            logger.info("source has no %s table; skipping", table)
+            return []
         columns = ", ".join(TABLE_COLUMNS[table])
         rows = [dict(r) for r in conn.execute(f"SELECT {columns} FROM {table} ORDER BY id")]
     finally:

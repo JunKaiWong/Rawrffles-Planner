@@ -91,6 +91,9 @@ def init_db(db_path: str | Path) -> None:
     if is_postgres(db_path):
         with connect(db_path) as conn:
             conn.executescript(POSTGRES_SCHEMA_PATH.read_text(encoding="utf-8"))
+            # Comma-separated file_ids predate link_photos on both engines, so
+            # the copy across is Python rather than engine-specific SQL.
+            _backfill_link_photos(conn)
             tables = [
                 dict(row)["table_name"]
                 for row in conn.execute(
@@ -107,6 +110,7 @@ def init_db(db_path: str | Path) -> None:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate(conn)
         _migrate_availability(conn)
+        _backfill_link_photos(conn)
         tables = [
             row["name"]
             for row in conn.execute(
@@ -160,20 +164,25 @@ def insert_link(
     title: str | None = None,
     caption: str | None = None,
     location: str | None = None,
-    photo_file_id: str | None = None,
     added_at: str | None = None,
 ) -> int:
     """Insert a link and return its new id.
 
     `url` is the raw pasted URL and is always stored; every metadata field is
     optional so a failed extraction still results in a saved link.
+
+    Photos are not a parameter: they are rows in link_photos, attached with
+    add_link_photos() once the id exists. The old links.photo_file_id column is
+    left in place but is no longer written - a value put there now would be
+    invisible, because the migration only adopts links that have no photo rows
+    yet.
     """
     added_at = added_at or utc_now_iso()
     with connect(db_path) as conn:
         cursor = conn.execute(
             "INSERT INTO links (url, canonical_url, platform, title, caption, "
-            "location, photo_file_id, added_by, added_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "location, added_by, added_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 url,
                 canonical_url,
@@ -181,7 +190,6 @@ def insert_link(
                 title,
                 caption,
                 location,
-                photo_file_id,
                 added_by,
                 added_at,
             ),
@@ -306,11 +314,19 @@ def save_caption_parse(
     )
 
 
-def split_file_ids(value: str | None) -> list[str]:
-    """Read the comma-separated photo_file_id column.
+# An intake screenshot is model input; a visit photo is a memory. Keeping the
+# two apart is the whole reason link_photos has a kind column - see schema.sql.
+PHOTO_INTAKE = "intake"
+PHOTO_VISIT = "visit"
+PHOTO_KINDS = (PHOTO_INTAKE, PHOTO_VISIT)
 
-    One column holds several ids because a slideshow post is several slides of
-    one post - they belong to the same link, not to separate rows. Telegram
+
+def split_file_ids(value: str | None) -> list[str]:
+    """Read the legacy comma-separated links.photo_file_id column.
+
+    Retained only for the migration into link_photos and for the SQLite to
+    Postgres copy, both of which read databases written before that table
+    existed. Nothing else should call this: photos are rows now. Telegram
     file_ids are base64url-ish and never contain a comma, so the split is safe.
     """
     if not value:
@@ -318,38 +334,160 @@ def split_file_ids(value: str | None) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def add_photo_file_ids(
-    db_path: str | Path, link_id: int, file_ids: list[str]
+def add_link_photos(
+    db_path: str | Path,
+    link_id: int,
+    photos: list[tuple[str, str | None]],
+    kind: str,
+    added_by: int | None = None,
+    added_at: str | None = None,
 ) -> list[str]:
-    """Append screenshots to a link, ignoring ones already attached.
+    """Attach photos to a link, skipping any already present.
 
-    Returns the ids that were actually new, so the caller can decide whether
-    anything changed and a re-parse is warranted.
+    `photos` is (file_id, thumb_file_id) pairs: the full-size id is what the
+    parser reads, the thumbnail is what a card renders. Returns the file_ids
+    actually inserted, so a caller can tell whether anything changed and
+    whether a re-parse is warranted.
+
+    A file_id already attached is skipped whatever its kind. The same image
+    cannot be both a menu the model reads and a souvenir, so a second send is
+    a repeat rather than a reclassification.
     """
-    if not file_ids:
+    if kind not in PHOTO_KINDS:
+        raise ValueError(f"unknown photo kind {kind!r}; expected one of {PHOTO_KINDS}")
+    if not photos:
         return []
+    added_at = added_at or utc_now_iso()
     with connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT photo_file_id FROM links WHERE id = ?", (link_id,)
-        ).fetchone()
-        if row is None:
+        if conn.execute("SELECT id FROM links WHERE id = ?", (link_id,)).fetchone() is None:
+            logger.info("cannot attach photos: link id=%s does not exist", link_id)
             return []
-        existing = split_file_ids(row["photo_file_id"])
-        added = [fid for fid in file_ids if fid not in existing]
-        if not added:
-            logger.info("link id=%s already has these screenshot(s)", link_id)
-            return []
-        conn.execute(
-            "UPDATE links SET photo_file_id = ? WHERE id = ?",
-            (",".join(existing + added), link_id),
-        )
+        existing = {
+            dict(row)["file_id"]
+            for row in conn.execute(
+                "SELECT file_id FROM link_photos WHERE link_id = ?", (link_id,)
+            )
+        }
+        added: list[str] = []
+        for file_id, thumb_file_id in photos:
+            if not file_id or file_id in existing:
+                continue
+            conn.execute(
+                "INSERT INTO link_photos "
+                "(link_id, file_id, thumb_file_id, kind, added_by, added_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (link_id, file_id, thumb_file_id, kind, added_by, added_at),
+            )
+            existing.add(file_id)
+            added.append(file_id)
+    if not added:
+        logger.info("link id=%s already has these %s photo(s)", link_id, kind)
+        return []
     logger.info(
-        "attached %d screenshot(s) to link id=%s (now %d)",
+        "attached %d %s photo(s) to link id=%s by user %s",
         len(added),
+        kind,
         link_id,
-        len(existing) + len(added),
+        added_by,
     )
     return added
+
+
+def list_link_photos(
+    db_path: str | Path, link_id: int, kind: str | None = None
+) -> list[sqlite3.Row]:
+    """Photos for one link, oldest first, optionally of a single kind."""
+    sql = (
+        "SELECT id, link_id, file_id, thumb_file_id, kind, added_by, added_at "
+        "FROM link_photos WHERE link_id = ?"
+    )
+    params: list = [link_id]
+    if kind is not None:
+        sql += " AND kind = ?"
+        params.append(kind)
+    with connect(db_path) as conn:
+        return conn.execute(sql + " ORDER BY id", tuple(params)).fetchall()
+
+
+def photos_by_link(db_path: str | Path) -> dict[int, list[dict]]:
+    """Every photo, grouped by link id.
+
+    The Mini App lists all links in one request, so their photos come back in
+    one query too rather than one per card.
+    """
+    grouped: dict[int, list[dict]] = {}
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, link_id, file_id, thumb_file_id, kind, added_by, added_at "
+            "FROM link_photos ORDER BY link_id, id"
+        ).fetchall()
+    for row in rows:
+        data = dict(row)
+        grouped.setdefault(int(data["link_id"]), []).append(data)
+    logger.debug("loaded %d photo(s) across %d link(s)", len(rows), len(grouped))
+    return grouped
+
+
+def get_link_photo(db_path: str | Path, photo_id: int) -> sqlite3.Row | None:
+    """One photo row, for the endpoint that streams its bytes."""
+    with connect(db_path) as conn:
+        return conn.execute(
+            "SELECT id, link_id, file_id, thumb_file_id, kind, added_by, added_at "
+            "FROM link_photos WHERE id = ?",
+            (photo_id,),
+        ).fetchone()
+
+
+def _backfill_link_photos(conn) -> None:
+    """Copy legacy links.photo_file_id values into link_photos.
+
+    Runs on every startup and is idempotent, but deliberately skips any link
+    that already has photo rows rather than merging id by id. Once a link has
+    been migrated its photos are managed in link_photos, and re-adding
+    whatever the old column still holds would resurrect a photo that had been
+    removed there.
+
+    Everything migrated is 'intake': the old column was only ever written by
+    link intake, since the Mini App could update done, rating and note alone.
+    added_by is left NULL - the column recorded no author, and inventing one
+    would be worse than an honest blank.
+    """
+    legacy = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, photo_file_id, added_at FROM links "
+            "WHERE photo_file_id IS NOT NULL AND photo_file_id <> ''"
+        )
+    ]
+    if not legacy:
+        return
+    already = {
+        int(dict(row)["link_id"])
+        for row in conn.execute("SELECT DISTINCT link_id FROM link_photos")
+    }
+    migrated = photos = 0
+    for row in legacy:
+        link_id = int(row["id"])
+        if link_id in already:
+            continue
+        file_ids = split_file_ids(row["photo_file_id"])
+        if not file_ids:
+            continue
+        for file_id in file_ids:
+            conn.execute(
+                "INSERT INTO link_photos "
+                "(link_id, file_id, thumb_file_id, kind, added_by, added_at) "
+                "VALUES (?, ?, NULL, ?, NULL, ?)",
+                (link_id, file_id, PHOTO_INTAKE, row["added_at"] or utc_now_iso()),
+            )
+            photos += 1
+        migrated += 1
+    if migrated:
+        logger.info(
+            "migrated %d photo(s) from links.photo_file_id across %d link(s)",
+            photos,
+            migrated,
+        )
 
 
 def links_needing_caption_parse(db_path: str | Path) -> list[sqlite3.Row]:
@@ -374,14 +512,22 @@ def links_needing_extraction_retry(db_path: str | Path) -> list[sqlite3.Row]:
     returned nothing for this link. A link with screenshots is excluded because
     the vision path has already supplied its content - retrying the extractor
     there would spend time to learn nothing new.
+
+    Only intake screenshots count. A visit photo says the couple went, not that
+    the post was ever readable, so a link with holiday snaps and no caption is
+    still worth retrying.
     """
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, parsed_at "
             "FROM links "
             "WHERE (caption IS NULL OR caption = '') "
-            "  AND (photo_file_id IS NULL OR photo_file_id = '') "
-            "ORDER BY id"
+            "  AND NOT EXISTS ("
+            "        SELECT 1 FROM link_photos "
+            "         WHERE link_photos.link_id = links.id AND kind = ?"
+            "      ) "
+            "ORDER BY id",
+            (PHOTO_INTAKE,),
         ).fetchall()
     logger.info("%d link(s) eligible for an extraction retry", len(rows))
     return rows
@@ -420,7 +566,7 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
             "SELECT id, url, canonical_url, platform, title, caption, location, "
             "region, category, subcategory, lat, lng, tags, added_by, added_at, "
             "done, done_at, done_by, "
-            "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
+            "rating, note, event_start, event_end, is_evergreen, "
             "parsed_at, geocode_status "
             "FROM links ORDER BY added_at DESC, id DESC"
         ).fetchall()
@@ -434,7 +580,7 @@ def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
             "SELECT id, url, canonical_url, platform, title, caption, location, "
             "region, category, subcategory, lat, lng, tags, added_by, added_at, "
             "done, done_at, done_by, "
-            "rating, note, photo_file_id, event_start, event_end, is_evergreen, "
+            "rating, note, event_start, event_end, is_evergreen, "
             "parsed_at, geocode_status "
             "FROM links WHERE id = ?",
             (link_id,),
