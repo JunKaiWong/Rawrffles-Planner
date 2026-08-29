@@ -6,9 +6,14 @@
 
 CREATE TABLE IF NOT EXISTS links (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    url            TEXT    NOT NULL,          -- exactly as pasted, always kept
+    -- The pasted URL, always kept exactly as sent. NULL for a manual entry:
+    -- a place tried without a link is a real row with no post behind it, and
+    -- an empty string would be a URL that happens to be blank rather than an
+    -- honest absence. Anything that reads a post - caption parsing, extraction
+    -- retries, metadata backfill - filters on url IS NOT NULL.
+    url            TEXT,
     canonical_url  TEXT,                      -- normalised dedup key, NULL if unresolved
-    platform       TEXT    NOT NULL,          -- 'tiktok' | 'instagram'
+    platform       TEXT,                      -- 'tiktok' | 'instagram', NULL when manual
     title          TEXT,                      -- from yt-dlp
     caption        TEXT,                      -- post description, from yt-dlp
     location       TEXT,                      -- rarely set by yt-dlp; LLM fills later
@@ -27,6 +32,13 @@ CREATE TABLE IF NOT EXISTS links (
     region         TEXT,                      -- country, e.g. 'Singapore'
     category       TEXT,                      -- closed set: food|activity|place|other
     subcategory    TEXT,                      -- closed set, per category
+    -- Lookup-only address, never shown. `location` holds what a human needs to
+    -- find the place (outlet name, unit number, street), and that is exactly
+    -- what makes OneMap fail: it does not understand "#02-38" and matches
+    -- "Singapore" against half the island. The hint carries a postal code or a
+    -- bare street address instead, so display quality and lookup accuracy stop
+    -- fighting each other. Set by hand when automatic geocoding fails.
+    geocode_hint   TEXT,
     -- Set by geocoding. NULL means unresolved, and geocoded_at/geocode_status
     -- (added by database._migrate) record whether it was ever attempted.
     lat            REAL,

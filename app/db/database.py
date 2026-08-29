@@ -42,6 +42,9 @@ _EXPECTED_LINK_COLUMNS = {
     # NULL coordinates plus a status is not the same as never having tried.
     "geocoded_at": "TEXT",
     "geocode_status": "TEXT",
+    # Lookup-only address, never displayed. See schema.sql for why this is not
+    # just `location`.
+    "geocode_hint": "TEXT",
 }
 
 # Links outside this region are kept and browsable but excluded from MRT-based
@@ -80,6 +83,64 @@ def _migrate(conn: sqlite3.Connection) -> None:
     )
 
 
+# Both describe the post a link came from, and a manual entry has no post. They
+# are relaxed together rather than one now and one later.
+_NULLABLE_FOR_MANUAL_ENTRIES = ("url", "platform")
+
+
+def _migrate_links_url_nullable(conn) -> None:
+    """Drop the NOT NULL on links.url and links.platform for a SQLite database
+    that predates manual entries. Postgres does this with one ALTER each in
+    schema_postgres.sql.
+
+    SQLite cannot alter a constraint in place, so the table is rebuilt. The new
+    definition is derived from PRAGMA table_info rather than written out here,
+    because the column list drifts with every migration and a hardcoded copy
+    would silently drop whatever was added last.
+    """
+    columns = [dict(row) for row in conn.execute("PRAGMA table_info(links)")]
+    if not columns:
+        return
+    still_required = [
+        c["name"]
+        for c in columns
+        if c["name"] in _NULLABLE_FOR_MANUAL_ENTRIES and c["notnull"]
+    ]
+    if not still_required:
+        return
+
+    logger.info("migrating: rebuilding links so %s may be NULL", ", ".join(still_required))
+
+    def definition(column: dict) -> str:
+        parts = [column["name"], column["type"] or "TEXT"]
+        if column["pk"]:
+            # id is the only primary key here, and it must keep AUTOINCREMENT
+            # so a deleted row's id is never handed out again.
+            parts.append("PRIMARY KEY AUTOINCREMENT")
+        elif column["notnull"] and column["name"] not in _NULLABLE_FOR_MANUAL_ENTRIES:
+            parts.append("NOT NULL")
+        if column["dflt_value"] is not None:
+            parts.append(f"DEFAULT {column['dflt_value']}")
+        return " ".join(parts)
+
+    names = ", ".join(c["name"] for c in columns)
+    body = ",\n            ".join(definition(c) for c in columns)
+    conn.execute("ALTER TABLE links RENAME TO links_old")
+    conn.executescript(
+        f"""
+        CREATE TABLE links (
+            {body}
+        );
+        INSERT INTO links ({names}) SELECT {names} FROM links_old;
+        DROP TABLE links_old;
+        CREATE INDEX IF NOT EXISTS idx_links_url       ON links (url);
+        CREATE INDEX IF NOT EXISTS idx_links_done      ON links (done);
+        CREATE INDEX IF NOT EXISTS idx_links_canonical ON links (canonical_url);
+        """
+    )
+    logger.info("links rebuilt with %d column(s)", len(columns))
+
+
 def init_db(db_path: str | Path) -> None:
     """Create tables if absent, then apply additive migrations.
 
@@ -111,6 +172,9 @@ def init_db(db_path: str | Path) -> None:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate(conn)
         _migrate_availability(conn)
+        # After _migrate: the rebuild copies whatever columns exist, so the new
+        # ones must already have been added.
+        _migrate_links_url_nullable(conn)
         _migrate_link_photos(conn)
         _backfill_link_photos(conn)
         tables = [
@@ -120,6 +184,72 @@ def init_db(db_path: str | Path) -> None:
             )
         ]
     logger.info("database ready (sqlite), tables: %s", ", ".join(tables))
+
+
+def create_manual_link(
+    db_path: str | Path,
+    added_by: int,
+    title: str,
+    location: str | None = None,
+    geocode_hint: str | None = None,
+    category: str | None = None,
+    subcategory: str | None = None,
+    tags: str | None = None,
+    note: str | None = None,
+    rating: int | None = None,
+    done: bool = False,
+    added_at: str | None = None,
+) -> int:
+    """Store a place tried without a link, returning its new id.
+
+    Deliberately a row in `links` rather than a table of its own: it needs the
+    same fields, the same geocoding, and the planner must not be able to tell
+    the difference. `url`, `canonical_url` and `platform` are NULL - there is
+    no post behind it.
+
+    `parsed_at` is stamped at creation. Nothing here came from a caption, so
+    there is nothing to extract, and leaving the marker NULL would put the row
+    in the caption-parse queue to spend Gemini quota learning what was just
+    typed in by hand.
+    """
+    added_at = added_at or utc_now_iso()
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO links (url, canonical_url, platform, title, location, "
+            "geocode_hint, category, subcategory, tags, note, rating, done, "
+            "done_at, done_by, added_by, added_at, parsed_at, is_evergreen) "
+            "VALUES (NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "RETURNING id",
+            (
+                title,
+                location,
+                geocode_hint,
+                category,
+                subcategory,
+                tags,
+                note,
+                rating,
+                bool(done),
+                added_at if done else None,
+                added_by if done else None,
+                added_by,
+                added_at,
+                added_at,
+                True,
+            ),
+        )
+        link_id = int(dict(cursor.fetchone())["id"])
+    logger.info(
+        "stored manual entry id=%s by=%s title=%r location=%r category=%s/%s done=%s",
+        link_id,
+        added_by,
+        (title or "")[:60],
+        (location or "")[:60],
+        category,
+        subcategory,
+        bool(done),
+    )
+    return link_id
 
 
 def find_link_by_url(db_path: str | Path, url: str) -> sqlite3.Row | None:
@@ -565,6 +695,28 @@ def _migrate_link_photos(conn) -> None:
     )
 
 
+def delete_link_photo(db_path: str | Path, link_id: int, photo_id: int) -> bool:
+    """Remove one photo from one link. True when a row was actually deleted.
+
+    Scoped to the link as well as the photo so a mistyped id cannot reach
+    someone else's row, and so the caller's 404 means the same thing the read
+    endpoint's does.
+    """
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM link_photos WHERE id = ? AND link_id = ?",
+            (photo_id, link_id),
+        )
+        deleted = cursor.rowcount > 0
+    logger.info(
+        "delete photo id=%s from link id=%s -> %s",
+        photo_id,
+        link_id,
+        "removed" if deleted else "no such photo",
+    )
+    return deleted
+
+
 def _backfill_link_photos(conn) -> None:
     """Copy legacy links.photo_file_id values into link_photos.
 
@@ -626,7 +778,7 @@ def links_needing_caption_parse(db_path: str | Path) -> list[sqlite3.Row]:
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, platform, title, caption FROM links "
-            "WHERE parsed_at IS NULL ORDER BY id"
+            "WHERE parsed_at IS NULL AND url IS NOT NULL ORDER BY id"
         ).fetchall()
     logger.info("%d link(s) awaiting caption parse", len(rows))
     return rows
@@ -648,7 +800,8 @@ def links_needing_extraction_retry(db_path: str | Path) -> list[sqlite3.Row]:
         rows = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, parsed_at "
             "FROM links "
-            "WHERE (caption IS NULL OR caption = '') "
+            "WHERE url IS NOT NULL "
+            "  AND (caption IS NULL OR caption = '') "
             "  AND NOT EXISTS ("
             "        SELECT 1 FROM link_photos "
             "         WHERE link_photos.link_id = links.id AND kind = ?"
@@ -678,8 +831,8 @@ def links_missing_metadata(db_path: str | Path) -> list[sqlite3.Row]:
     """Rows stored before extraction ran, i.e. with no canonical URL yet."""
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, url, platform FROM links WHERE canonical_url IS NULL "
-            "ORDER BY id"
+            "SELECT id, url, platform FROM links "
+            "WHERE canonical_url IS NULL AND url IS NOT NULL ORDER BY id"
         ).fetchall()
     logger.info("%d link(s) missing metadata", len(rows))
     return rows
@@ -691,8 +844,8 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "region, category, subcategory, lat, lng, tags, added_by, added_at, "
-            "done, done_at, done_by, "
+            "geocode_hint, region, category, subcategory, lat, lng, tags, "
+            "added_by, added_at, done, done_at, done_by, "
             "rating, note, event_start, event_end, is_evergreen, "
             "parsed_at, geocode_status "
             "FROM links ORDER BY added_at DESC, id DESC"
@@ -705,8 +858,8 @@ def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "region, category, subcategory, lat, lng, tags, added_by, added_at, "
-            "done, done_at, done_by, "
+            "geocode_hint, region, category, subcategory, lat, lng, tags, "
+            "added_by, added_at, done, done_at, done_by, "
             "rating, note, event_start, event_end, is_evergreen, "
             "parsed_at, geocode_status "
             "FROM links WHERE id = ?",
@@ -730,7 +883,22 @@ def update_link(
     Marking done/undone also maintains done_at and done_by, which the caller
     never sets directly - they record when it happened and who did it.
     """
-    allowed_columns = {"done", "rating", "note"}
+    # Widened beyond the done-flow fields because a parsed title or location is
+    # occasionally wrong, and correcting it in place beats re-sending the link
+    # and hoping the model does better. Still an explicit set: an unknown key
+    # must fail loudly rather than be silently dropped, and the column names
+    # must never come from the request.
+    allowed_columns = {
+        "done",
+        "rating",
+        "note",
+        "title",
+        "location",
+        "geocode_hint",
+        "category",
+        "subcategory",
+        "tags",
+    }
     unknown = set(changes) - allowed_columns
     if unknown:
         # Guards against a typo'd field silently doing nothing, and keeps the
