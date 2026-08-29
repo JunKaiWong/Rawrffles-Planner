@@ -53,4 +53,10 @@ $RECYCLE.BIN/
 .DS_Store
 
 # --- Logs ---
+# The whole directory, not just *.log. Python's RotatingFileHandler writes
+# bot.log.1 … bot.log.5, and none of those match *.log - so a rotated file was
+# untracked AND unignored, which is exactly what `git add .` sweeps up. Logs
+# have carried a DATABASE_URL before now.
+logs/
 *.log
+*.log.*
