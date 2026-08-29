@@ -19,6 +19,7 @@ import logging
 from app.bot import setup_logging
 from app.config import load_settings
 from app.db.database import init_db, links_missing_metadata, update_link_metadata
+from app.db.engine import describe
 from app.services.extractor import extract_async
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,11 @@ def main() -> None:
 
     setup_logging()
     settings = load_settings()
-    logger.info("backfilling database at %s (dry_run=%s)", settings.db_path, args.dry_run)
+    # describe() strips the password. A DATABASE_URL carries credentials, so
+    # it must never reach a log file or a console.
+    logger.info(
+        "backfilling database at %s (dry_run=%s)", describe(settings.db_path), args.dry_run
+    )
     # The DB may predate the metadata columns, and this job can run before the
     # bot has started with the new schema.
     init_db(settings.db_path)
