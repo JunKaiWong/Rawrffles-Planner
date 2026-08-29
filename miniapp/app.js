@@ -172,6 +172,11 @@ const els = {
   rating: document.getElementById("rating"),
   note: document.getElementById("note"),
   saveBtn: document.getElementById("save-btn"),
+  sheetPhotos: document.getElementById("sheet-photos"),
+  photoAdd: document.getElementById("photo-add"),
+  photoInput: document.getElementById("photo-input"),
+  viewer: document.getElementById("photo-viewer"),
+  viewerImg: document.getElementById("photo-viewer-img"),
   dateBanner: document.getElementById("date-banner"),
   calendar: document.getElementById("calendar"),
   calGrid: document.getElementById("cal-grid"),
@@ -306,6 +311,114 @@ const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
 
+// --- Photos ---------------------------------------------------------------
+//
+// Photo bytes are behind the same initData header as every other endpoint, and
+// an <img src> cannot send a header - so an <img> pointed straight at the API
+// would render a broken icon. Each image is fetched with the header instead and
+// handed to the <img> as a blob URL.
+//
+// The alternative, a signed token in the query string, was rejected: it puts a
+// credential in a URL that ends up in logs and history, to save a fetch.
+//
+// Blob URLs are cached by path and never revoked. The cache holds a handful of
+// images for one couple's saved links, and re-rendering the list on every
+// filter change would otherwise re-download all of them.
+
+const photoUrls = new Map(); // API path -> Promise<blob URL>
+
+function photoBlobUrl(path) {
+  if (!photoUrls.has(path)) {
+    const pending = fetch(`${API_BASE}${path.replace(API_BASE, "")}`, {
+      headers: { "X-Telegram-Init-Data": tg.initData || "" },
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`photo failed (${response.status})`);
+        return response.blob();
+      })
+      .then((blob) => URL.createObjectURL(blob))
+      .catch((err) => {
+        // Drop the failed attempt so a later render can retry: a cold Render
+        // service can time out the first request and answer the second.
+        photoUrls.delete(path);
+        throw err;
+      });
+    photoUrls.set(path, pending);
+  }
+  return photoUrls.get(path);
+}
+
+// innerHTML cannot carry a blob URL that does not exist yet, so images are
+// rendered as empty placeholders and filled in afterwards.
+function hydratePhotos(root) {
+  (root || document).querySelectorAll("img[data-photo]").forEach((img) => {
+    if (img.dataset.loaded === "1") return;
+    img.dataset.loaded = "1";
+    photoBlobUrl(img.dataset.photo)
+      .then((url) => {
+        img.src = url;
+      })
+      .catch(() => {
+        // A photo that will not load must not leave a grey box implying one is
+        // coming. Remove the frame and let the card stand on its text.
+        img.dataset.loaded = "";
+        const frame = img.closest(".thumbs") || img;
+        frame.remove();
+      });
+  });
+}
+
+async function uploadPhoto(linkId, file) {
+  // Not api(): that sets a JSON content type, and multipart needs the boundary
+  // the browser generates.
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch(`${API_BASE}/links/${linkId}/photos`, {
+    method: "POST",
+    headers: { "X-Telegram-Init-Data": tg.initData || "" },
+    body,
+  });
+  if (!response.ok) {
+    let detail = `Upload failed (${response.status})`;
+    try {
+      const payload = await response.json();
+      if (typeof payload.detail === "string") detail = payload.detail;
+    } catch (err) {
+      /* no JSON body; keep the generic message */
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function photosOfKind(link, kind) {
+  return (link.photos || []).filter((photo) => photo.kind === kind);
+}
+
+// What a card shows. A finished outing leads with the photos from the day; one
+// still to visit leads with the screenshot, which is usually the menu or poster
+// that made it worth saving.
+function cardPhotos(link) {
+  const visit = photosOfKind(link, "visit");
+  if (link.done && visit.length) return visit;
+  return photosOfKind(link, "intake");
+}
+
+function thumbsHtml(photos, limit) {
+  if (!photos.length) return "";
+  const shown = photos.slice(0, limit);
+  const extra = photos.length - shown.length;
+  const tiles = shown
+    .map(
+      (photo) =>
+        `<button type="button" class="thumb" data-photo-id="${photo.id}" aria-label="Open photo">` +
+        `<img data-photo="${escapeHtml(photo.thumb_url)}" alt="" /></button>`
+    )
+    .join("");
+  const more = extra > 0 ? `<span class="thumbs__more">+${extra}</span>` : "";
+  return `<div class="thumbs">${tiles}${more}</div>`;
+}
+
 // --- Rendering ------------------------------------------------------------
 
 function escapeHtml(value) {
@@ -383,11 +496,15 @@ function cardHtml(link) {
     ? `<span class="card__check${selected ? " is-checked" : ""}" aria-hidden="true"></span>`
     : "";
 
+  // Capped at three: a card is a glance, and an album belongs in the sheet.
+  const thumbs = thumbsHtml(cardPhotos(link), 3);
+
   return `
     <article class="card${link.done ? " card--done" : ""}${expired ? " card--expired" : ""}${
       state.selecting ? " card--selectable" : ""
-    }${selected ? " card--selected" : ""}" data-id="${link.id}">
+    }${selected ? " card--selected" : ""}${thumbs ? " card--has-photo" : ""}" data-id="${link.id}">
       ${checkbox}
+      ${thumbs}
       <div class="card__body">
         <h2 class="card__title">${title}</h2>
         ${caption ? `<p class="card__caption">${caption}</p>` : ""}
@@ -573,6 +690,7 @@ function render() {
 
   const visible = tabLinks.filter(matchesFilters);
   els.list.innerHTML = visible.map(cardHtml).join("");
+  hydratePhotos(els.list);
 
   const filtered = visible.length !== tabLinks.length || state.category !== "all" || state.tag;
   const emptyMessage = filtered
@@ -600,6 +718,16 @@ function selectedRating() {
   return active ? Number(active.dataset.value) : null;
 }
 
+function renderSheetPhotos() {
+  const link = state.pending;
+  if (!link) return;
+  const visit = photosOfKind(link, "visit");
+  els.sheetPhotos.innerHTML = visit.length
+    ? thumbsHtml(visit, visit.length)
+    : `<p class="field__hint">No photos from this visit yet.</p>`;
+  hydratePhotos(els.sheetPhotos);
+}
+
 function openSheet(link) {
   state.pending = link;
   els.sheetPlace.textContent = displayTitle(link);
@@ -607,12 +735,65 @@ function openSheet(link) {
   els.rating.querySelectorAll(".rating__btn").forEach((btn) => {
     btn.classList.toggle("is-active", Number(btn.dataset.value) === link.rating);
   });
+  renderSheetPhotos();
+  els.photoInput.value = "";
   els.sheet.hidden = false;
+}
+
+// Photos upload as soon as they are picked rather than on Save. Saving is a
+// PATCH of rating and note; an upload goes to Telegram and can take seconds on
+// a phone, and burying that inside Save would make Save look stuck.
+async function addPhotos(files) {
+  const link = state.pending;
+  if (!link || !files.length) return;
+  els.photoAdd.disabled = true;
+  const original = els.photoAdd.textContent;
+  let added = 0;
+  try {
+    for (const [index, file] of files.entries()) {
+      els.photoAdd.textContent =
+        files.length > 1 ? `Uploading ${index + 1}/${files.length}…` : "Uploading…";
+      const photo = await uploadPhoto(link.id, file);
+      link.photos = [...(link.photos || []), photo];
+      added += 1;
+      renderSheetPhotos();
+    }
+    setStatus("");
+    tg.HapticFeedback.notificationOccurred("success");
+  } catch (err) {
+    // Say how many made it: stopping at the third of five is not a total
+    // failure, and re-picking all five would duplicate the first two.
+    setStatus(added ? `${err.message} (${added} uploaded first)` : err.message, "error");
+  } finally {
+    els.photoAdd.disabled = false;
+    els.photoAdd.textContent = original;
+    els.photoInput.value = "";
+  }
 }
 
 function closeSheet() {
   els.sheet.hidden = true;
   state.pending = null;
+}
+
+// --- Photo viewer ---------------------------------------------------------
+
+function openPhoto(photoId) {
+  const photo = state.links
+    .flatMap((link) => link.photos || [])
+    .find((candidate) => candidate.id === Number(photoId));
+  if (!photo) return;
+  // The viewer asks for the full size; the card only ever loaded a thumbnail.
+  els.viewerImg.removeAttribute("src");
+  els.viewerImg.dataset.photo = photo.url;
+  els.viewerImg.dataset.loaded = "";
+  els.viewer.hidden = false;
+  hydratePhotos(els.viewer);
+}
+
+function closePhoto() {
+  els.viewer.hidden = true;
+  els.viewerImg.removeAttribute("src");
 }
 
 // --- Events ---------------------------------------------------------------
@@ -1227,6 +1408,13 @@ els.list.addEventListener("click", async (event) => {
     return;
   }
 
+  // A thumbnail opens the photo rather than doing anything to the card.
+  const thumbButton = event.target.closest("button[data-photo-id]");
+  if (thumbButton) {
+    openPhoto(thumbButton.dataset.photoId);
+    return;
+  }
+
   // Tapping a tag on a card filters by it.
   const tagButton = event.target.closest("button[data-tag]");
   if (tagButton) {
@@ -1271,6 +1459,20 @@ els.rating.addEventListener("click", (event) => {
 
 els.sheet.addEventListener("click", (event) => {
   if (event.target.dataset.close) closeSheet();
+});
+
+els.photoAdd.addEventListener("click", () => els.photoInput.click());
+els.photoInput.addEventListener("change", () => addPhotos([...els.photoInput.files]));
+
+// Thumbnails inside the sheet open the same viewer as the ones on a card.
+els.sheetPhotos.addEventListener("click", (event) => {
+  const thumb = event.target.closest("button[data-photo-id]");
+  if (thumb) openPhoto(thumb.dataset.photoId);
+});
+
+els.viewer.addEventListener("click", closePhoto);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.viewer.hidden) closePhoto();
 });
 
 els.doneForm.addEventListener("submit", async (event) => {

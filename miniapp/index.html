@@ -255,11 +255,28 @@
                   placeholder="e.g. go before 7pm or you queue"></textarea>
       </label>
 
+      <!--
+        Photos from the day. They upload as they are picked, not on Save: the
+        upload relays through Telegram and can take a few seconds, which would
+        make Save look stuck.
+      -->
+      <div class="field">
+        <span class="field__label">Photos <span class="field__hint">optional, posted to the group</span></span>
+        <div class="thumbs-strip" id="sheet-photos"></div>
+        <button type="button" class="btn btn--ghost btn--sm" id="photo-add">Add photo</button>
+        <input type="file" id="photo-input" accept="image/*" multiple hidden />
+      </div>
+
       <div class="sheet__actions">
         <button type="button" class="btn btn--ghost" data-close="1">Cancel</button>
         <button type="submit" class="btn btn--primary" id="save-btn">Save</button>
       </div>
     </form>
+  </div>
+
+  <!-- Full-size viewer. Tapping anywhere closes it. -->
+  <div id="photo-viewer" class="viewer" hidden>
+    <img id="photo-viewer-img" class="viewer__img" alt="Photo" />
   </div>
 
   <script src="app.js"></script>
