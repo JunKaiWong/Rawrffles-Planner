@@ -66,6 +66,35 @@
   box-sizing: border-box;
 }
 
+/* The hidden attribute has to beat a component's own display value. Without
+   this, `display: flex` silently outranks it and the element stays on screen -
+   which is exactly how the links list kept rendering behind the Calendar and
+   Settings tabs, and how the photo viewer once painted a broken image over the
+   list. Ten separate `.thing[hidden] { display: none }` patches used to live in
+   this file, one per element that had been caught; this replaces them. */
+[hidden] {
+  display: none !important;
+}
+
+/* Paints the top safe area at every scroll position. The tabs stick *below*
+   the inset, so without this the strip between the viewport edge and the tab
+   row is body padding - transparent - and the list scrolls visibly through it.
+   Fixed rather than a pseudo-element on .tabs, which would cover the subtitle
+   whenever the page was scrolled to the top. Zero height when there is no
+   inset, so it costs nothing outside Telegram. */
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--safe-top);
+  background: var(--tg-bg);
+  /* Above the sticky tabs, below the sheets and the photo viewer. */
+  z-index: 6;
+  pointer-events: none;
+}
+
 body {
   margin: 0;
   /* Keeps every scrolling element clear of the notch, the home indicator and
@@ -100,10 +129,6 @@ body {
   display: flex;
   gap: 6px;
   margin-top: 8px;
-}
-
-.dev-banner__form[hidden] {
-  display: none;
 }
 
 .dev-banner__input {
@@ -157,10 +182,6 @@ body {
 }
 
 .date-banner::-webkit-scrollbar {
-  display: none;
-}
-
-.date-banner[hidden] {
   display: none;
 }
 
@@ -243,10 +264,6 @@ body {
   padding: 0 16px;
 }
 
-.settings[hidden] {
-  display: none;
-}
-
 .settings__intro {
   margin: 0 0 16px;
   color: var(--tg-hint);
@@ -299,14 +316,22 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 0 16px 12px;
   position: sticky;
   /* Sticky offsets are measured from the scrollport edge, which body padding
      does not move - so the tabs need the inset again or they would stick
      underneath Telegram's header once the list scrolls. */
   top: var(--safe-top);
   z-index: 5;
+  /* Opaque, and following the client's theme rather than a fixed colour, so
+     the list scrolls behind the tabs instead of through them. */
   background: var(--tg-bg);
+  /* Body padding insets this element, which would leave a transparent strip
+     down each side in landscape on a notched phone. Pulling the margins back
+     out and putting the same amount into the padding keeps the text where it
+     was while the background reaches both edges. */
+  margin-left: calc(-1 * var(--safe-left));
+  margin-right: calc(-1 * var(--safe-right));
+  padding: 0 calc(16px + var(--safe-right)) 12px calc(16px + var(--safe-left));
 }
 
 .tab {
@@ -365,10 +390,6 @@ body {
   font-weight: 650;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   cursor: pointer;
-}
-
-.fab[hidden] {
-  display: none;
 }
 
 .fab:disabled {
@@ -541,10 +562,6 @@ body {
   padding: 0 16px;
 }
 
-.calendar[hidden] {
-  display: none;
-}
-
 .calendar__head {
   display: flex;
   align-items: center;
@@ -686,10 +703,6 @@ body {
   background: var(--tg-secondary-bg);
 }
 
-.day-theirs[hidden] {
-  display: none;
-}
-
 .day-theirs__who {
   display: flex;
   align-items: center;
@@ -810,10 +823,6 @@ body {
   margin-bottom: 12px;
 }
 
-.day-events[hidden] {
-  display: none;
-}
-
 .day-event {
   display: flex;
   align-items: baseline;
@@ -845,10 +854,6 @@ body {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 8px;
-}
-
-.filters__row[hidden] {
-  display: none;
 }
 
 .filters__row--sub {
@@ -1102,10 +1107,6 @@ body {
   justify-content: center;
 }
 
-.sheet[hidden] {
-  display: none;
-}
-
 .sheet__backdrop {
   position: absolute;
   inset: 0;
@@ -1291,12 +1292,6 @@ body {
   padding: calc(16px + var(--safe-top)) calc(16px + var(--safe-right))
     calc(16px + var(--safe-bottom)) calc(16px + var(--safe-left));
   background: rgba(0, 0, 0, 0.85);
-}
-
-/* display:flex would otherwise beat the hidden attribute, as it does for
- * .sheet above. */
-.viewer[hidden] {
-  display: none;
 }
 
 .viewer__img {

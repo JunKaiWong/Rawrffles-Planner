@@ -558,6 +558,15 @@ because both were shipped once:
   floor, so a client reporting zero for an inset the browser knows about cannot
   talk the app out of it.
 
+- **`hidden` loses to `display`.** An element with `display: flex` of its own
+  stays on screen when the attribute is set, silently. This caused three
+  separate bugs — a photo viewer painting over the list, and the links list
+  rendering behind both the Calendar and Settings tabs — each patched with
+  another `.thing[hidden] { display: none }` until there were ten of them. One
+  `[hidden] { display: none !important }` replaces the lot. Setting `.hidden`
+  in JavaScript is the app's only way of showing and hiding, so this rule has
+  to hold without exception.
+
 Check changes at 320px as well as 390px, and check the dialogs, not just the
 list: the done, date, day and plan sheets are all easy to leave overflowing
 because they are usually opened on a desktop while developing. The screenshots
