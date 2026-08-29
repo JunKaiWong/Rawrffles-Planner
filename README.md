@@ -28,19 +28,25 @@ that only ever suggests places you actually chose.
   reading of user screenshots for posts that can't be scraped
 - **Structured parsing** — one LLM call per link produces title, location,
   region, event dates, category, subcategory, and tags
-- **Geocoding** — locations resolved to coordinates via OneMap, with ambiguous
-  results flagged rather than guessed
+- **Geocoding** — locations resolved to coordinates via OneMap. A lookup that
+  fails is not silent: the entry is badged in the list and counted in the
+  header, because an unplaceable entry is dropped from every plan and there is
+  otherwise nothing to notice
 - **Mini App** — To visit / Day trips / Done / Calendar / Settings tabs,
-  category and tag filters, ratings out of 10, and notes
+  category and tag filters, ratings out of 10, and notes. Laid out for a phone
+  first, since that is where Telegram opens it
 - **Manual entries** — add a place you tried without a link: name, location,
   category, tags, rating and photos, straight into Done if you have already
   been. Geocoded like any link, so the planner can use it
 - **Editing** — fix a title or location a parse got wrong, change a rating or
-  note, add or remove photos, without re-sending the link
+  note, add or remove photos, without re-sending the link. Where a location
+  reads well but geocodes badly, a separate lookup-only hint takes a postal
+  code and leaves the displayed address alone
 - **Photos** — the screenshot of a post previews on its card, so a menu or an
-  event poster is visible at a glance; photos from the day attach to a link
-  when you mark it done. The two are stored separately: only the screenshot is
-  ever read by the model
+  event poster is visible at a glance. Photos from the day attach to a link
+  either from the Mini App or by sending them to the group with `+visit` in the
+  caption. The two kinds are stored apart and only the screenshot is ever read
+  by the model — a holiday snap is a memory, not evidence about a post
 - **Date planner** — clusters saved links by proximity, tiers them by urgency,
   and generates an itinerary; fills gaps with real nearby venues when saved
   links don't cover them
@@ -110,6 +116,10 @@ OneMap geocoding → lat/lng
    ↓
 Postgres → REST API → Mini App
 ```
+
+A place added by hand enters at the geocoding step. Its fields were typed, so
+there is nothing to extract and no model call to make; it is otherwise an
+ordinary row, and the planner cannot tell the difference.
 
 ## Stack
 
@@ -194,6 +204,14 @@ coverage omits Singapore, and data.gov.sg publishes downloadable datasets
 rather than a location query. OneMap's thematic layers fill gaps with real
 nearby *venues*, so a plan can suggest a place that exists but never an event
 that isn't already in the list.
+
+**Photos you upload use database space.** A screenshot sent through Telegram
+costs nothing to keep — only its file id is stored, and Telegram re-serves the
+image. A photo uploaded from the Mini App has never been to Telegram, so its
+bytes are stored in Postgres, against Neon's 0.5GB free tier. The app
+downscales each one in the browser before sending, which puts a typical photo
+in the low hundreds of kilobytes, but the two are not equally free and only one
+of them scales indefinitely.
 
 **Cold starts.** Render's free tier sleeps after about fifteen minutes idle and
 takes roughly a minute to wake. An uptime monitor keeps it warm most of the
