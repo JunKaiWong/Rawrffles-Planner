@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS links (
     region         TEXT,                      -- country, e.g. 'Singapore'
     category       TEXT,                      -- closed set: food|activity|place|other
     subcategory    TEXT,                      -- closed set, per category
+    -- A roundup rather than a place: "August markets & fairs" lists eight
+    -- events at eight venues, so there is no single point to geocode. Marking
+    -- it says "no location expected", which suppresses the needs-a-location
+    -- badge and keeps it out of planning. It stays browsable - the content is
+    -- still worth having, it just is not somewhere you can go.
+    is_collection  INTEGER NOT NULL DEFAULT 0,
     -- Lookup-only address, never shown. `location` holds what a human needs to
     -- find the place (outlet name, unit number, street), and that is exactly
     -- what makes OneMap fail: it does not understand "#02-38" and matches

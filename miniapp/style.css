@@ -1319,6 +1319,18 @@ body {
   color: #ffc866;
 }
 
+/* Not a warning - a statement about what this entry is. Deliberately quieter
+ * than the attention badge, which is the one that wants acting on. */
+.badge--collection {
+  background: rgba(127, 127, 127, 0.2);
+  color: var(--tg-hint);
+}
+
+/* A field that does not apply right now: still readable, visibly inactive. */
+.field--muted {
+  opacity: 0.55;
+}
+
 /* A thumbnail with a delete affordance sitting over its corner. */
 .thumb-wrap {
   position: relative;

@@ -115,6 +115,8 @@ ALTER TABLE links ADD COLUMN IF NOT EXISTS geocoded_at    TEXT;
 -- Lookup-only address for when OneMap cannot place `location`. See schema.sql
 -- for why the two are separate columns rather than one.
 ALTER TABLE links ADD COLUMN IF NOT EXISTS geocode_hint   TEXT;
+-- A roundup with no single location. See schema.sql.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS is_collection BOOLEAN NOT NULL DEFAULT FALSE;
 -- A manual entry - a place tried without a post behind it - has no URL.
 ALTER TABLE links ALTER COLUMN url      DROP NOT NULL;
 ALTER TABLE links ALTER COLUMN platform DROP NOT NULL;

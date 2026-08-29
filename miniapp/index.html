@@ -308,6 +308,14 @@
         <span class="field__label">We have been here</span>
       </label>
 
+      <!-- A roundup of several venues has no single location, so asking for one
+           and then complaining it could not be found is noise. -->
+      <label class="field field--inline" id="entry-collection-field" hidden>
+        <input id="entry-collection" type="checkbox" />
+        <span class="field__label">A collection or reference
+          <span class="field__hint">lists several places — not planned around</span></span>
+      </label>
+
       <!--
         Photos from the day. They upload as they are picked, not on Save: the
         image is downscaled and sent, which takes a moment on a phone and would

@@ -36,6 +36,7 @@ users allowlisted, Mini App opening from the Telegram group.
 | Edit dialog: title, location, category, tags, rating, note | Done |
 | Separate geocode hint, re-geocoding on save | Done |
 | Badge + count for links geocoding could not place | Done |
+| Collections — roundups with no single location | Done |
 | `link_photos` table, intake vs visit photos | Done |
 | Screenshot previews on cards + full-size viewer | Done |
 | Visit photos: Mini App upload and `+visit` in chat | Done |
@@ -262,6 +263,18 @@ Saving one re-runs geocoding; so does changing `location`. Both are editable in
 the Mini App, because the person who knows where the place actually is is the
 one holding the phone.
 
+**Some entries have no location to find.** A roundup — "August 2026 Markets &
+Fairs" listing eight events at eight venues — has no single point, so badging it
+nags about something that cannot be fixed. `is_collection` says "no location
+expected": no lookup is attempted, the badge is suppressed, and the planner
+excludes it explicitly with "a collection, not a single place" rather than the
+misleading "no coordinates". It stays browsable, because the content is still
+worth having; it just is not somewhere you can go.
+
+Marking one does not erase its `geocode_status` — un-marking restores the badge,
+and a lookup runs again, because a wrongly-marked entry should recover rather
+than stay silently unplannable.
+
 **A failed lookup is visible.** `geocode_status` of `ambiguous` or `not_found`
 means the planner drops the link silently, so the card carries a badge and the
 header a count. The badge is a button: it opens the edit dialog with the hint
@@ -373,8 +386,8 @@ no URL, and no source badge when there is no platform.
 
 `links(id, url, canonical_url, platform, caption, title, tags, added_by,
 added_at, parsed_at, done, done_at, done_by, rating, note, photo_file_id,
-event_start, event_end, is_evergreen, location, geocode_hint, region, lat, lng,
-geocoded_at, geocode_status, category, subcategory)`
+event_start, event_end, is_evergreen, location, geocode_hint, is_collection,
+region, lat, lng, geocoded_at, geocode_status, category, subcategory)`
 
 `link_photos(id, link_id, file_id, thumb_file_id, image_data, content_type,
 digest, kind, added_by, added_at)` — `kind` is `intake` | `visit`.

@@ -167,8 +167,9 @@ def select_candidates(
     """Links that could appear in a plan today.
 
     Excluded: anything done, anything expired, anything without coordinates
-    (it cannot be placed in a cluster), and day trips, which are kept and
-    browsable but are not an MRT stop away.
+    (it cannot be placed in a cluster), day trips, which are kept and browsable
+    but are not an MRT stop away, and collections - a roundup of eight venues
+    is not a stop, however useful it is to have saved.
 
     The day-trip check is explicit rather than implied. Geocoding skips
     locations outside the home region, so day trips usually have no
@@ -185,6 +186,11 @@ def select_candidates(
     for row in rows:
         data = dict(row)
         if data.get("done"):
+            continue
+        # Before the coordinate check, so the debug log says what this is
+        # rather than that it could not be placed - it was never meant to be.
+        if data.get("is_collection"):
+            logger.debug("id=%s is a collection, excluded", data["id"])
             continue
         if data.get("lat") is None or data.get("lng") is None:
             continue
@@ -573,6 +579,10 @@ def _explain_exclusions(
             continue
         if data.get("done"):
             reasons[link_id] = "already done"
+        # Ahead of the coordinates branch for the same reason as the day-trip
+        # check: "no coordinates" would describe a failure, and this is not one.
+        elif data.get("is_collection"):
+            reasons[link_id] = "a collection, not a single place"
         # Checked before coordinates: a day trip is normally never geocoded, so
         # the honest reason is where it is, not that the lookup was skipped.
         elif is_day_trip(data.get("region"), home_region):

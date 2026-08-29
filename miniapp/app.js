@@ -193,6 +193,8 @@ const els = {
   entryTags: document.getElementById("entry-tags"),
   entryDoneField: document.getElementById("entry-done-field"),
   entryDone: document.getElementById("entry-done"),
+  entryCollectionField: document.getElementById("entry-collection-field"),
+  entryCollection: document.getElementById("entry-collection"),
   addManual: document.getElementById("add-manual"),
   photoAdd: document.getElementById("photo-add"),
   photoInput: document.getElementById("photo-input"),
@@ -531,6 +533,11 @@ function cardHtml(link) {
       `<button type="button" class="badge badge--attention" data-fix-location="1">` +
         `Location not found · fix</button>`
     );
+  }
+  // Says why there is no location, rather than leaving a card that looks
+  // half-filled in.
+  if (link.is_collection) {
+    meta.push(`<span class="badge badge--collection">Collection</span>`);
   }
   if (link.is_day_trip && link.region) {
     meta.push(`<span class="badge badge--daytrip">${escapeHtml(link.region)}</span>`);
@@ -880,6 +887,17 @@ function renderSubcategoryPicker() {
     .join("");
 }
 
+// A collection has no location, so the two location fields stop asking for
+// one. Disabled rather than hidden: the values are kept, and un-ticking the box
+// brings them straight back rather than looking like they were discarded.
+function syncCollectionFields() {
+  const isCollection = els.entryCollection.checked;
+  els.entryLocation.disabled = isCollection;
+  els.entryHint.disabled = isCollection;
+  els.entryLocation.closest(".field").classList.toggle("field--muted", isCollection);
+  els.entryHint.closest(".field").classList.toggle("field--muted", isCollection);
+}
+
 function setRating(value) {
   els.rating.querySelectorAll(".rating__btn").forEach((btn) => {
     btn.classList.toggle("is-active", Number(btn.dataset.value) === value);
@@ -900,6 +918,7 @@ function openSheet(link, mode = "done") {
   const editing = mode !== "done";
   els.entryFields.hidden = !editing;
   els.entryDoneField.hidden = mode !== "create" && mode !== "edit";
+  els.entryCollectionField.hidden = els.entryDoneField.hidden;
   els.sheetTitle.textContent =
     mode === "create" ? "Add a place" : mode === "edit" ? "Edit" : "Mark as done";
   els.sheetPlace.textContent = link ? displayTitle(link) : "Somewhere with no link";
@@ -915,6 +934,8 @@ function openSheet(link, mode = "done") {
   setRating(link ? link.rating : null);
   // A place added by hand is usually one already visited, so this starts on.
   els.entryDone.checked = link ? !!link.done : true;
+  els.entryCollection.checked = link ? !!link.is_collection : false;
+  syncCollectionFields();
 
   renderSheetPhotos();
   els.photoInput.value = "";
@@ -1693,6 +1714,8 @@ els.photoInput.addEventListener("change", () => addPhotos([...els.photoInput.fil
 
 els.addManual.addEventListener("click", () => openSheet(null, "create"));
 
+els.entryCollection.addEventListener("change", syncCollectionFields);
+
 els.entryCategory.addEventListener("click", (event) => {
   const chip = event.target.closest("button[data-entry-category]");
   if (!chip) return;
@@ -1752,6 +1775,7 @@ function entryFieldsFromForm() {
     geocode_hint: els.entryHint.value.trim() || null,
     category: state.entryCategory,
     subcategory: state.entrySubcategory,
+    is_collection: els.entryCollection.checked,
     // Split here rather than server-side: the column is comma-separated, and
     // the API rejects a tag containing one.
     tags: els.entryTags.value

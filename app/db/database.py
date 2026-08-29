@@ -45,6 +45,9 @@ _EXPECTED_LINK_COLUMNS = {
     # Lookup-only address, never displayed. See schema.sql for why this is not
     # just `location`.
     "geocode_hint": "TEXT",
+    # A roundup with no single location. NOT NULL needs a default here, which
+    # SQLite allows on ADD COLUMN, so existing rows become 0 rather than NULL.
+    "is_collection": "INTEGER NOT NULL DEFAULT 0",
 }
 
 # Links outside this region are kept and browsable but excluded from MRT-based
@@ -198,6 +201,7 @@ def create_manual_link(
     note: str | None = None,
     rating: int | None = None,
     done: bool = False,
+    is_collection: bool = False,
     added_at: str | None = None,
 ) -> int:
     """Store a place tried without a link, returning its new id.
@@ -217,8 +221,9 @@ def create_manual_link(
         cursor = conn.execute(
             "INSERT INTO links (url, canonical_url, platform, title, location, "
             "geocode_hint, category, subcategory, tags, note, rating, done, "
-            "done_at, done_by, added_by, added_at, parsed_at, is_evergreen) "
-            "VALUES (NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "done_at, done_by, added_by, added_at, parsed_at, is_evergreen, "
+            "is_collection) "
+            "VALUES (NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "RETURNING id",
             (
                 title,
@@ -236,6 +241,7 @@ def create_manual_link(
                 added_at,
                 added_at,
                 True,
+                bool(is_collection),
             ),
         )
         link_id = int(dict(cursor.fetchone())["id"])
@@ -844,7 +850,7 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "geocode_hint, region, category, subcategory, lat, lng, tags, "
+            "geocode_hint, is_collection, region, category, subcategory, lat, lng, tags, "
             "added_by, added_at, done, done_at, done_by, "
             "rating, note, event_start, event_end, is_evergreen, "
             "parsed_at, geocode_status "
@@ -858,7 +864,7 @@ def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT id, url, canonical_url, platform, title, caption, location, "
-            "geocode_hint, region, category, subcategory, lat, lng, tags, "
+            "geocode_hint, is_collection, region, category, subcategory, lat, lng, tags, "
             "added_by, added_at, done, done_at, done_by, "
             "rating, note, event_start, event_end, is_evergreen, "
             "parsed_at, geocode_status "
@@ -895,6 +901,7 @@ def update_link(
         "title",
         "location",
         "geocode_hint",
+        "is_collection",
         "category",
         "subcategory",
         "tags",
@@ -972,11 +979,14 @@ def links_needing_geocode(db_path: str | Path) -> list:
 
     geocoded_at IS NULL is the whole check, so a link that failed is not
     retried automatically - re-running is a deliberate act.
+
+    Collections are skipped: a roundup of eight venues has no single point, so
+    a lookup would spend a request to record a failure that is not one.
     """
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT id, url, platform, title, location, region "
-            "FROM links WHERE geocoded_at IS NULL ORDER BY id"
+            "FROM links WHERE geocoded_at IS NULL AND NOT is_collection ORDER BY id"
         ).fetchall()
     logger.info("%d link(s) awaiting geocoding", len(rows))
     return rows

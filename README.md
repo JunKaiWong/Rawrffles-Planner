@@ -38,6 +38,9 @@ that only ever suggests places you actually chose.
 - **Manual entries** — add a place you tried without a link: name, location,
   category, tags, rating and photos, straight into Done if you have already
   been. Geocoded like any link, so the planner can use it
+- **Collections** — a roundup listing several venues has no single location to
+  geocode, so it can be marked as one: excluded from planning, and never
+  nagged about a lookup that could not have succeeded
 - **Editing** — fix a title or location a parse got wrong, change a rating or
   note, add or remove photos, without re-sending the link. Where a location
   reads well but geocodes badly, a separate lookup-only hint takes a postal

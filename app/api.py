@@ -156,6 +156,9 @@ class LinkOut(BaseModel):
     # Lookup-only, never rendered on a card. Exposed because the edit dialog
     # has to show and change it.
     geocode_hint: str | None = None
+    # A roundup rather than a place: no location is expected, so it is kept out
+    # of planning and never badged for a lookup that could not have succeeded.
+    is_collection: bool = False
     region: str | None = None
     category: str | None = None
     subcategory: str | None = None
@@ -256,6 +259,10 @@ class ManualLinkIn(BaseModel):
     note: str | None = Field(default=None, max_length=500)
     rating: int | None = Field(default=None, ge=1, le=10)
     done: bool = False
+    is_collection: bool = Field(
+        default=False,
+        description="A roundup with no single location: not planned around, never badged.",
+    )
 
 
 class PhotoOut(BaseModel):
@@ -426,6 +433,7 @@ class _LinkPatchExtra(BaseModel):
     category: str | None = None
     subcategory: str | None = None
     tags: list[str] | None = None
+    is_collection: bool | None = None
 
 
 class LinkUpdate(_LinkPatchExtra):
@@ -483,7 +491,12 @@ def _row_to_link(
     # Geocoding ran and could not place it, so the planner will drop it without
     # saying so. Derived here rather than in the client, next to the rule it
     # belongs with.
-    data["needs_location"] = data.get("geocode_status") in (AMBIGUOUS, NOT_FOUND)
+    data["is_collection"] = bool(data.get("is_collection"))
+    # A collection has no location to fail at finding, so badging one would be
+    # nagging about something that cannot be fixed.
+    data["needs_location"] = not data["is_collection"] and data.get(
+        "geocode_status"
+    ) in (AMBIGUOUS, NOT_FOUND)
     raw_tags = data.get("tags") or ""
     data["tags"] = [tag for tag in (t.strip() for t in raw_tags.split(",")) if tag]
     return LinkOut(**data)
@@ -500,6 +513,9 @@ def _geocode_link(db_path, link_id: int, row) -> None:
     Blocking HTTP, so callers hand it to a thread.
     """
     data = dict(row)
+    if data.get("is_collection"):
+        logger.debug("id=%s is a collection; no location to resolve", link_id)
+        return
     query = (data.get("geocode_hint") or "").strip() or data.get("location")
     try:
         located = geocode(query, data.get("region"))
@@ -1196,6 +1212,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             (payload.note or "").strip() or None,
             payload.rating,
             payload.done,
+            payload.is_collection,
         )
 
         row = await asyncio.to_thread(get_link, settings.db_path, link_id)
@@ -1290,9 +1307,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Coordinates are derived from these two, so a change to either makes
         # the stored ones stale. Re-running here is also the whole point of the
         # hint: you type one precisely because the last attempt failed.
+        # Un-marking a collection is also a move: it was never looked up, so
+        # its location has never been resolved even though it has not changed.
         moved = any(
             field in changes and changes[field] != current.get(field)
-            for field in ("location", "geocode_hint")
+            for field in ("location", "geocode_hint", "is_collection")
         )
         if moved:
             await asyncio.to_thread(_geocode_link, settings.db_path, link_id, row)
