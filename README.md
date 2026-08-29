@@ -86,8 +86,11 @@ GitHub Actions ──► scheduled jobs, run independently of Render
 Two front ends, one backend. GitHub Actions provides external cron because a
 free-tier service that sleeps cannot fire its own schedules — the workflow talks
 to Neon and the Telegram API directly, so a sleeping web service doesn't stop a
-reminder going out. An uptime monitor pings `/health` to keep the service warm,
-so replies arrive in seconds rather than after a cold start.
+reminder going out. An UptimeRobot monitor pings `/health` every five
+minutes to keep the service warm, so replies arrive in seconds rather than
+after a cold start. It is configured in UptimeRobot rather than in this
+repository — nothing here sets it up, so there is nothing to find. (Render's
+own `healthCheckPath` in `render.yaml` is a deploy probe, not a keep-alive.)
 
 Scheduled: daily reminders, a daily pass to parse any captions still waiting,
 and a weekly yt-dlp upgrade that retries links it previously couldn't read.
@@ -104,11 +107,16 @@ bounded at three attempts.
 ```
 paste URL
    ↓
-chat allowlist check          ← before any billable call
+chat allowlist check              ← before any billable call
    ↓
-URL detection → canonical resolution → dedup
+URL detection
    ↓
-yt-dlp → TikTok oEmbed → user screenshot   (fallback chain)
+dedup on the pasted URL           ← exact match, no network call yet
+   ↓
+yt-dlp → TikTok oEmbed → user screenshot
+   (the fallback chain, which also resolves the canonical URL)
+   ↓
+dedup on the canonical URL        ← catches share links and tracking params
    ↓
 single Gemini call → structured JSON
    ↓
@@ -116,6 +124,11 @@ OneMap geocoding → lat/lng
    ↓
 Postgres → REST API → Mini App
 ```
+
+Deduplication brackets extraction rather than preceding it. The cheap check
+runs first so a link already saved costs nothing to recognise; the canonical
+URL only exists once extraction has resolved it, so the second check has to
+wait until then.
 
 A place added by hand enters at the geocoding step. Its fields were typed, so
 there is nothing to extract and no model call to make; it is otherwise an
@@ -160,12 +173,12 @@ Requires Python 3.12+.
 
 ```bash
 python -m venv venv
-venv\Scripts\activate          # Windows; source venv/bin/activate elsewhere
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env.planner  # then fill it in
+cp .env.example .env.planner    # Windows: copy .env.example .env.planner
 ```
 
-Then run whichever half you need:
+Fill in `.env.planner`, then run whichever half you need:
 
 ```bash
 python -m app.bot    # the bot, polling
@@ -186,11 +199,16 @@ Local development defaults to polling; production uses webhooks, selected via
 
 ## Limitations
 
-**Photo posts can't be extracted.** TikTok slideshows and Instagram carousel
-(`/p/`) posts expose no caption or metadata to any of the extraction paths.
-These need a screenshot: send the informative slide to the group with the post
-URL in the photo's caption, and the vision path reads it. Scraping the slide
-images is deliberately not done — it's fragile and most slides are irrelevant.
+**Photo posts can't be extracted**, for two different reasons that happen to
+share a workaround. TikTok slideshows defeat the oEmbed fallback, which returns
+400 for a photo post rather than a caption. Instagram `/p/` carousels defeat
+yt-dlp, which generally needs an authenticated session there, and oEmbed is a
+TikTok endpoint so there is no second path to try.
+
+Either way the fix is the same: send the informative slide to the group with the
+post URL in the photo's caption, and the vision path reads it. Scraping the
+slide images is deliberately not done — it's fragile and most slides are
+irrelevant.
 
 **yt-dlp breaks when platforms change their internals.** It scrapes, so
 extraction failures are periodic and often intermittent — the same URL can fail
@@ -214,8 +232,9 @@ in the low hundreds of kilobytes, but the two are not equally free and only one
 of them scales indefinitely.
 
 **Cold starts.** Render's free tier sleeps after about fifteen minutes idle and
-takes roughly a minute to wake. An uptime monitor keeps it warm most of the
-time, but a deploy or a missed ping means the first message after it waits.
+takes roughly a minute to wake. The external UptimeRobot monitor described above
+keeps it warm most of the time, but a deploy or a missed ping means the first
+message after it waits.
 
 ## Scope
 
