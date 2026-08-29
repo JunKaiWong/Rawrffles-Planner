@@ -169,6 +169,8 @@
   <div class="actions">
     <button id="plan-all-btn" class="btn btn--primary btn--sm" type="button">Plan with all</button>
     <button id="select-btn" class="btn btn--ghost btn--sm" type="button">Select</button>
+    <!-- A place tried without a link: same row, same geocoding, same planner. -->
+    <button id="add-manual" class="btn btn--ghost btn--sm" type="button">Add place</button>
   </div>
 
   <section id="settings" class="settings" hidden>
@@ -235,14 +237,58 @@
   <div id="status" class="status" hidden></div>
 
   <!--
-    Done sheet: marking something done captures a rating and a note, since the
-    rating is what feeds back into the AI planner.
+    One sheet for three jobs: adding a place by hand, editing an existing entry,
+    and marking something done. They were separate until editing arrived, at
+    which point two sheets were both offering a rating, a note and photos.
+
+    Which fields appear depends on the mode, not on whether the entry came from
+    a link: a parsed title is wrong often enough that correcting it has to be
+    possible everywhere.
   -->
   <div id="sheet" class="sheet" hidden>
     <div class="sheet__backdrop" data-close="1"></div>
-    <form class="sheet__panel" id="done-form">
-      <h2 class="sheet__title">Mark as done</h2>
+    <form class="sheet__panel sheet__panel--tall" id="done-form">
+      <h2 class="sheet__title" id="sheet-title">Mark as done</h2>
       <p class="sheet__subtitle" id="sheet-place"></p>
+
+      <!-- Descriptive fields. Hidden while simply marking something done, so
+           that flow stays two taps. -->
+      <div id="entry-fields" hidden>
+        <label class="field">
+          <span class="field__label">Name</span>
+          <input id="entry-title" class="field__input" type="text" maxlength="200"
+                 placeholder="e.g. Ghim Moh chicken rice" />
+        </label>
+
+        <label class="field">
+          <span class="field__label">Location <span class="field__hint">shown on the card</span></span>
+          <input id="entry-location" class="field__input" type="text" maxlength="300"
+                 placeholder="Blk 20 Ghim Moh Rd #01-23, Singapore 270020" />
+        </label>
+
+        <label class="field">
+          <span class="field__label">Geocode hint
+            <span class="field__hint">only if the map lookup failed; never shown</span></span>
+          <input id="entry-hint" class="field__input" type="text" maxlength="200"
+                 placeholder="Postal code or plain street — unit numbers and the word Singapore make lookups fail" />
+        </label>
+
+        <label class="field">
+          <span class="field__label">Category</span>
+          <div class="chip-row" id="entry-category"></div>
+        </label>
+
+        <label class="field" id="entry-subcategory-field">
+          <span class="field__label">Subcategory</span>
+          <div class="chip-row" id="entry-subcategory"></div>
+        </label>
+
+        <label class="field">
+          <span class="field__label">Tags <span class="field__hint">comma separated</span></span>
+          <input id="entry-tags" class="field__input" type="text"
+                 placeholder="halal, rooftop, queue long" />
+        </label>
+      </div>
 
       <label class="field">
         <span class="field__label">Rating <span class="field__hint">optional, 1–10</span></span>
@@ -253,6 +299,13 @@
         <span class="field__label">Note <span class="field__hint">optional</span></span>
         <textarea id="note" class="field__input" rows="3"
                   placeholder="e.g. go before 7pm or you queue"></textarea>
+      </label>
+
+      <!-- Manual entries are usually added after the visit, so this defaults on
+           for a new place and reflects the current state when editing. -->
+      <label class="field field--inline" id="entry-done-field" hidden>
+        <input id="entry-done" type="checkbox" />
+        <span class="field__label">We have been here</span>
       </label>
 
       <!--

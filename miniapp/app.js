@@ -140,7 +140,16 @@ const state = {
   category: "all",
   subcategory: "all",
   tag: null,
-  pending: null, // link awaiting the done sheet
+  pending: null, // link the sheet is acting on, null while creating
+  // "done" keeps marking-visited to two taps; "edit" and "create" show the
+  // descriptive fields.
+  sheetMode: "done",
+  // Files picked before a manual entry exists. An upload needs a link id, so
+  // they are held here and sent once the row has been created.
+  pendingPhotos: [],
+  taxonomy: null,
+  entryCategory: null,
+  entrySubcategory: null,
   saving: false,
   selecting: false,
   selected: new Set(),
@@ -173,6 +182,18 @@ const els = {
   note: document.getElementById("note"),
   saveBtn: document.getElementById("save-btn"),
   sheetPhotos: document.getElementById("sheet-photos"),
+  sheetTitle: document.getElementById("sheet-title"),
+  entryFields: document.getElementById("entry-fields"),
+  entryTitle: document.getElementById("entry-title"),
+  entryLocation: document.getElementById("entry-location"),
+  entryHint: document.getElementById("entry-hint"),
+  entryCategory: document.getElementById("entry-category"),
+  entrySubcategory: document.getElementById("entry-subcategory"),
+  entrySubcategoryField: document.getElementById("entry-subcategory-field"),
+  entryTags: document.getElementById("entry-tags"),
+  entryDoneField: document.getElementById("entry-done-field"),
+  entryDone: document.getElementById("entry-done"),
+  addManual: document.getElementById("add-manual"),
   photoAdd: document.getElementById("photo-add"),
   photoInput: document.getElementById("photo-input"),
   viewer: document.getElementById("photo-viewer"),
@@ -310,6 +331,10 @@ const requestPlan = (linkIds) =>
 const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
+const createLink = (body) => api("/links", { method: "POST", body: JSON.stringify(body) });
+const fetchTaxonomy = () => api("/taxonomy");
+const deletePhoto = (linkId, photoId) =>
+  api(`/links/${linkId}/photos/${photoId}`, { method: "DELETE" });
 
 // --- Photos ---------------------------------------------------------------
 //
@@ -494,7 +519,19 @@ function cardHtml(link) {
   const caption = link.caption ? escapeHtml(link.caption.slice(0, 140)) : "";
   const expired = isExpired(link);
 
-  const meta = [`<span class="badge badge--${escapeHtml(link.platform)}">${platform}</span>`];
+  // A manual entry has no platform, so it gets no source badge rather than an
+  // empty one.
+  const meta = link.platform
+    ? [`<span class="badge badge--${escapeHtml(link.platform)}">${platform}</span>`]
+    : [];
+  // Geocoding ran and failed, which silently removes this from every plan.
+  // A button, not a label: it opens the fix.
+  if (link.needs_location) {
+    meta.push(
+      `<button type="button" class="badge badge--attention" data-fix-location="1">` +
+        `Location not found · fix</button>`
+    );
+  }
   if (link.is_day_trip && link.region) {
     meta.push(`<span class="badge badge--daytrip">${escapeHtml(link.region)}</span>`);
   }
@@ -548,7 +585,14 @@ function cardHtml(link) {
         ${doneDetails.length ? `<div class="card__done-details">${doneDetails.join("")}</div>` : ""}
       </div>
       <div class="card__actions">
-        <a class="btn btn--ghost btn--sm" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">Open</a>
+        ${
+          // No post behind a manual entry, so no link to open. Rendering a
+          // dead "Open" would be worse than rendering nothing.
+          link.url
+            ? `<a class="btn btn--ghost btn--sm" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">Open</a>`
+            : ""
+        }
+        <button class="btn btn--ghost btn--sm" data-action="edit">Edit</button>
         <button class="btn btn--sm ${link.done ? "btn--ghost" : "btn--primary"}" data-action="${link.done ? "undone" : "done"}">
           ${link.done ? "Undo" : "Done"}
         </button>
@@ -717,7 +761,13 @@ function render() {
   els.countTodo.textContent = todo.length;
   els.countDayTrip.textContent = dayTrips.length;
   els.countDone.textContent = done.length;
-  els.subtitle.textContent = `${state.links.length} saved · ${done.length} visited`;
+  // Links the planner will drop for want of coordinates. Counted across every
+  // tab, not just the visible one: the whole problem is that they are easy to
+  // miss.
+  const unplaceable = state.links.filter((link) => link.needs_location).length;
+  els.subtitle.textContent =
+    `${state.links.length} saved · ${done.length} visited` +
+    (unplaceable ? ` · ${unplaceable} need a location` : "");
 
   const byTab = { todo, daytrip: dayTrips, done };
   const tabLinks = byTab[state.tab] || todo;
@@ -755,24 +805,142 @@ function selectedRating() {
 
 function renderSheetPhotos() {
   const link = state.pending;
-  if (!link) return;
-  const visit = photosOfKind(link, "visit");
-  els.sheetPhotos.innerHTML = visit.length
-    ? thumbsHtml(visit, visit.length)
-    : `<p class="field__hint">No photos from this visit yet.</p>`;
+  // While creating, the entry has no id yet, so the picked files are shown
+  // from local object URLs and uploaded once the row exists.
+  if (!link) {
+    els.sheetPhotos.innerHTML = state.pendingPhotos.length
+      ? state.pendingPhotos
+          .map(
+            (file, index) =>
+              `<span class="thumb thumb--pending"><img src="${URL.createObjectURL(file)}" alt="" />` +
+              `<button type="button" class="thumb__remove" data-drop-pending="${index}" ` +
+              `aria-label="Remove photo">&times;</button></span>`
+          )
+          .join("")
+      : `<p class="field__hint">Photos upload when you save.</p>`;
+    return;
+  }
+  // Marking something done is about the visit, so only the memories show.
+  // Editing is about correcting the entry, and a screenshot of the wrong post
+  // is exactly the kind of thing that needs removing - so edit mode shows both.
+  const shown =
+    state.sheetMode === "edit"
+      ? [...photosOfKind(link, "intake"), ...photosOfKind(link, "visit")]
+      : photosOfKind(link, "visit");
+  els.sheetPhotos.innerHTML = shown.length
+    ? shown
+        .map(
+          (photo) =>
+            `<span class="thumb-wrap">` +
+            `<button type="button" class="thumb" data-photo-id="${photo.id}" aria-label="Open photo">` +
+            `<img data-photo="${escapeHtml(photo.thumb_url)}" alt="" /></button>` +
+            `<button type="button" class="thumb__remove" data-delete-photo="${photo.id}" ` +
+            `aria-label="Delete ${photo.kind === "intake" ? "screenshot" : "photo"}">&times;</button>` +
+            (photo.kind === "intake"
+              ? `<span class="thumb__kind">screenshot</span>`
+              : "") +
+            `</span>`
+        )
+        .join("")
+    : `<p class="field__hint">${
+        state.sheetMode === "edit" ? "No photos yet." : "No photos from this visit yet."
+      }</p>`;
   hydratePhotos(els.sheetPhotos);
 }
 
-function openSheet(link) {
-  state.pending = link;
-  els.sheetPlace.textContent = displayTitle(link);
-  els.note.value = link.note || "";
+// --- Category pickers -----------------------------------------------------
+
+function renderCategoryPicker() {
+  const categories = (state.taxonomy && state.taxonomy.categories) || [];
+  els.entryCategory.innerHTML = categories
+    .map(
+      (name) =>
+        `<button type="button" class="chip-btn${state.entryCategory === name ? " is-active" : ""}" ` +
+        `data-entry-category="${escapeHtml(name)}">${escapeHtml(CATEGORY_LABELS[name] || name)}</button>`
+    )
+    .join("");
+  renderSubcategoryPicker();
+}
+
+function renderSubcategoryPicker() {
+  const subs =
+    (state.taxonomy &&
+      state.taxonomy.subcategories &&
+      state.taxonomy.subcategories[state.entryCategory]) ||
+    [];
+  // A subcategory only means anything under a category, so the row disappears
+  // rather than offering choices that would be rejected on save.
+  els.entrySubcategoryField.hidden = subs.length === 0;
+  els.entrySubcategory.innerHTML = subs
+    .map(
+      (name) =>
+        `<button type="button" class="chip-btn${state.entrySubcategory === name ? " is-active" : ""}" ` +
+        `data-entry-subcategory="${escapeHtml(name)}">${escapeHtml(name)}</button>`
+    )
+    .join("");
+}
+
+function setRating(value) {
   els.rating.querySelectorAll(".rating__btn").forEach((btn) => {
-    btn.classList.toggle("is-active", Number(btn.dataset.value) === link.rating);
+    btn.classList.toggle("is-active", Number(btn.dataset.value) === value);
   });
+}
+
+/**
+ * One sheet, three modes.
+ *   done   - mark visited: rating, note, photos only
+ *   edit   - everything, on an entry that already exists
+ *   create - everything, on a place with no link behind it
+ */
+function openSheet(link, mode = "done") {
+  state.pending = link;
+  state.sheetMode = mode;
+  state.pendingPhotos = [];
+
+  const editing = mode !== "done";
+  els.entryFields.hidden = !editing;
+  els.entryDoneField.hidden = mode !== "create" && mode !== "edit";
+  els.sheetTitle.textContent =
+    mode === "create" ? "Add a place" : mode === "edit" ? "Edit" : "Mark as done";
+  els.sheetPlace.textContent = link ? displayTitle(link) : "Somewhere with no link";
+
+  els.entryTitle.value = (link && link.title) || "";
+  els.entryLocation.value = (link && link.location) || "";
+  els.entryHint.value = (link && link.geocode_hint) || "";
+  els.entryTags.value = ((link && link.tags) || []).join(", ");
+  els.note.value = (link && link.note) || "";
+  state.entryCategory = (link && link.category) || null;
+  state.entrySubcategory = (link && link.subcategory) || null;
+  renderCategoryPicker();
+  setRating(link ? link.rating : null);
+  // A place added by hand is usually one already visited, so this starts on.
+  els.entryDone.checked = link ? !!link.done : true;
+
   renderSheetPhotos();
   els.photoInput.value = "";
   els.sheet.hidden = false;
+  if (!state.taxonomy && editing) loadTaxonomy();
+}
+
+async function loadTaxonomy() {
+  try {
+    state.taxonomy = await fetchTaxonomy();
+    renderCategoryPicker();
+  } catch (err) {
+    // The categories are closed, so guessing them client-side is not an
+    // option; say so rather than silently offering none.
+    setStatus(`Could not load categories: ${err.message}`, "error");
+  }
+}
+
+function openEditFor(linkId, focusHint = false) {
+  const link = state.links.find((item) => item.id === Number(linkId));
+  if (!link) return;
+  openSheet(link, "edit");
+  if (focusHint) {
+    els.entryHint.focus();
+    els.entryHint.scrollIntoView({ block: "center" });
+  }
 }
 
 // Photos upload as soon as they are picked rather than on Save. Saving is a
@@ -780,7 +948,14 @@ function openSheet(link) {
 // a phone, and burying that inside Save would make Save look stuck.
 async function addPhotos(files) {
   const link = state.pending;
-  if (!link || !files.length) return;
+  if (!files.length) return;
+  if (!link) {
+    // Creating: no id to attach to yet. Hold them and upload after the save.
+    state.pendingPhotos.push(...files);
+    renderSheetPhotos();
+    els.photoInput.value = "";
+    return;
+  }
   els.photoAdd.disabled = true;
   const original = els.photoAdd.textContent;
   let added = 0;
@@ -809,6 +984,9 @@ async function addPhotos(files) {
 function closeSheet() {
   els.sheet.hidden = true;
   state.pending = null;
+  // Files picked but never saved must not reappear on the next entry.
+  state.pendingPhotos = [];
+  state.sheetMode = "done";
 }
 
 // --- Photo viewer ---------------------------------------------------------
@@ -1443,6 +1621,15 @@ els.list.addEventListener("click", async (event) => {
     return;
   }
 
+  // The badge on an unplaceable entry opens the fix, with the hint focused:
+  // the field is the answer to the thing the badge is complaining about.
+  const fixButton = event.target.closest("button[data-fix-location]");
+  if (fixButton) {
+    const card = fixButton.closest(".card");
+    if (card) openEditFor(card.dataset.id, true);
+    return;
+  }
+
   // A thumbnail opens the photo rather than doing anything to the card.
   const thumbButton = event.target.closest("button[data-photo-id]");
   if (thumbButton) {
@@ -1465,7 +1652,12 @@ els.list.addEventListener("click", async (event) => {
   if (!link) return;
 
   if (button.dataset.action === "done") {
-    openSheet(link);
+    openSheet(link, "done");
+    return;
+  }
+
+  if (button.dataset.action === "edit") {
+    openSheet(link, "edit");
     return;
   }
 
@@ -1499,8 +1691,51 @@ els.sheet.addEventListener("click", (event) => {
 els.photoAdd.addEventListener("click", () => els.photoInput.click());
 els.photoInput.addEventListener("change", () => addPhotos([...els.photoInput.files]));
 
-// Thumbnails inside the sheet open the same viewer as the ones on a card.
-els.sheetPhotos.addEventListener("click", (event) => {
+els.addManual.addEventListener("click", () => openSheet(null, "create"));
+
+els.entryCategory.addEventListener("click", (event) => {
+  const chip = event.target.closest("button[data-entry-category]");
+  if (!chip) return;
+  const value = chip.dataset.entryCategory;
+  state.entryCategory = state.entryCategory === value ? null : value;
+  // The old subcategory belongs to the old category and would be rejected.
+  state.entrySubcategory = null;
+  renderCategoryPicker();
+});
+
+els.entrySubcategory.addEventListener("click", (event) => {
+  const chip = event.target.closest("button[data-entry-subcategory]");
+  if (!chip) return;
+  const value = chip.dataset.entrySubcategory;
+  state.entrySubcategory = state.entrySubcategory === value ? null : value;
+  renderSubcategoryPicker();
+});
+
+// Thumbnails inside the sheet open the viewer; the × removes one.
+els.sheetPhotos.addEventListener("click", async (event) => {
+  const dropping = event.target.closest("button[data-drop-pending]");
+  if (dropping) {
+    state.pendingPhotos.splice(Number(dropping.dataset.dropPending), 1);
+    renderSheetPhotos();
+    return;
+  }
+  const removing = event.target.closest("button[data-delete-photo]");
+  if (removing) {
+    const link = state.pending;
+    if (!link) return;
+    const photoId = Number(removing.dataset.deletePhoto);
+    removing.disabled = true;
+    try {
+      await deletePhoto(link.id, photoId);
+      link.photos = (link.photos || []).filter((photo) => photo.id !== photoId);
+      renderSheetPhotos();
+      render();
+    } catch (err) {
+      removing.disabled = false;
+      setStatus(err.message, "error");
+    }
+    return;
+  }
   const thumb = event.target.closest("button[data-photo-id]");
   if (thumb) openPhoto(thumb.dataset.photoId);
 });
@@ -1510,23 +1745,75 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !els.viewer.hidden) closePhoto();
 });
 
+function entryFieldsFromForm() {
+  return {
+    title: els.entryTitle.value.trim(),
+    location: els.entryLocation.value.trim() || null,
+    geocode_hint: els.entryHint.value.trim() || null,
+    category: state.entryCategory,
+    subcategory: state.entrySubcategory,
+    // Split here rather than server-side: the column is comma-separated, and
+    // the API rejects a tag containing one.
+    tags: els.entryTags.value
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean),
+  };
+}
+
 els.doneForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!state.pending || state.saving) return;
-
+  if (state.saving) return;
+  const mode = state.sheetMode;
   const link = state.pending;
-  const changes = { done: true };
+  if (!link && mode !== "create") return;
+
   const rating = selectedRating();
-  if (rating !== null) changes.rating = rating;
   const note = els.note.value.trim();
-  if (note) changes.note = note;
 
   state.saving = true;
   els.saveBtn.disabled = true;
   els.saveBtn.textContent = "Saving…";
   try {
-    const updated = await patchLink(link.id, changes);
-    Object.assign(link, updated);
+    if (mode === "create") {
+      const fields = entryFieldsFromForm();
+      if (!fields.title) {
+        setStatus("A name is needed — everything else is optional.", "error");
+        return;
+      }
+      const created = await createLink({
+        ...fields,
+        note: note || null,
+        rating,
+        done: els.entryDone.checked,
+      });
+      // Photos could not be uploaded before the row existed; send them now.
+      for (const file of state.pendingPhotos) {
+        try {
+          created.photos = [
+            ...(created.photos || []),
+            await uploadPhoto(created.id, await downscale(file)),
+          ];
+        } catch (err) {
+          setStatus(`Saved, but a photo did not upload: ${err.message}`, "error");
+        }
+      }
+      state.links = [created, ...state.links];
+    } else {
+      const changes = { note: note || null };
+      if (rating !== null) changes.rating = rating;
+      if (mode === "done") {
+        changes.done = true;
+      } else {
+        Object.assign(changes, entryFieldsFromForm(), { done: els.entryDone.checked });
+        if (!changes.title) {
+          setStatus("A name is needed.", "error");
+          return;
+        }
+      }
+      const updated = await patchLink(link.id, changes);
+      Object.assign(link, updated);
+    }
     tg.HapticFeedback.notificationOccurred("success");
     closeSheet();
     render();

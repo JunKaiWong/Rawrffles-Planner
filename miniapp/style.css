@@ -1287,3 +1287,103 @@ body {
   border-radius: 8px;
   object-fit: contain;
 }
+
+/* --- Entry sheet: attention badge and photo removal ----------------------- */
+
+/* A link geocoding could not place is dropped from every plan without saying
+ * so. The badge is a button because it opens the fix.
+ *
+ * Colours are checked rather than eyeballed. Flattened over the card
+ * background, the text reaches 6.2:1 in light and 6.2:1 in dark, both past the
+ * 4.5:1 WCAG AA needs at this size.
+ */
+.badge--attention {
+  border: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(245, 159, 11, 0.22);
+  color: #7a4300;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .badge--attention {
+    color: #ffc866;
+  }
+}
+
+:root[data-theme="dark"] .badge--attention {
+  color: #ffc866;
+}
+
+/* A thumbnail with a delete affordance sitting over its corner. */
+.thumb-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.thumb--pending {
+  position: relative;
+  display: inline-flex;
+  width: 64px;
+  height: 64px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.thumb--pending img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb__remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.thumb__remove:disabled {
+  opacity: 0.5;
+}
+
+/* Checkbox and label on one line, unlike the stacked fields around it. */
+.field--inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field--inline .field__label {
+  margin: 0;
+}
+
+/* An intake screenshot is model input; saying which is which matters in the
+ * edit sheet, where both kinds sit side by side and either can be deleted. */
+.thumb__kind {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 9px;
+  text-align: center;
+  border-radius: 0 0 10px 10px;
+  pointer-events: none;
+}
