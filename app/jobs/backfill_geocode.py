@@ -11,6 +11,10 @@ but is a public service, so requests are paced by the geocoder itself.
 Nothing here can fail a link: a location outside Singapore, one OneMap cannot
 find, and one too vague to place are all recorded as outcomes, and the link
 keeps everything else it had - including its day-trip flag.
+
+A link with a geocode_hint is looked up by the hint rather than by its
+displayed location, and collections are skipped entirely, so neither --force
+nor a normal run can undo a correction made from the Mini App.
 """
 
 import argparse
@@ -45,8 +49,13 @@ def run(settings, dry_run: bool = False, force: bool = False, limit: int | None 
     for row in rows:
         data = dict(row)
         link_id = data["id"]
-        location = data.get("location")
         region = data.get("region")
+        # The hint wins, exactly as it does on the API path (app.api._geocode_link).
+        # This job used to look up `location` alone, so a --force run would
+        # re-resolve by the display address and overwrite coordinates that a
+        # hand-typed hint had corrected - undoing the fix the badge asked for.
+        hint = (data.get("geocode_hint") or "").strip()
+        location = hint or data.get("location")
 
         result = geocode(location, region)
         tally[result.status] = tally.get(result.status, 0) + 1

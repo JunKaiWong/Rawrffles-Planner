@@ -1477,8 +1477,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail=(
-                    f"that photo is {len(content) // (1024 * 1024)}MB; Telegram "
-                    f"accepts up to {MAX_UPLOAD_BYTES // (1024 * 1024)}MB"
+                    f"that photo is {len(content) // (1024 * 1024)}MB; uploads are "
+                    f"stored in the database and capped at "
+                    f"{MAX_UPLOAD_BYTES // (1024 * 1024)}MB each. The Mini App "
+                    "normally downscales before sending, so seeing this means it "
+                    "could not - try a smaller photo."
                 ),
             )
 

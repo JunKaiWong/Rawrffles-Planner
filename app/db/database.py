@@ -820,14 +820,22 @@ def links_needing_extraction_retry(db_path: str | Path) -> list[sqlite3.Row]:
 
 
 def all_links_for_reparse(db_path: str | Path) -> list[sqlite3.Row]:
-    """Every link with a caption, ignoring the parsed_at cache.
+    """Every link with a post behind it, ignoring the parsed_at cache.
 
     Only for a deliberate re-parse after the prompt or storage rules change;
     it re-spends quota, which normal operation never does.
+
+    Manual entries are excluded by `url IS NOT NULL`, the same filter the
+    once-only path uses. Their fields were typed by hand, so a re-parse would
+    spend a call per entry to overwrite what someone wrote with the model's
+    guess at it - and a manual entry always has a title, so the parser would
+    not even skip it for having nothing to read. Stamping parsed_at at creation
+    keeps them out of the normal queue; this keeps them out of the forced one.
     """
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, url, platform, title, caption FROM links ORDER BY id"
+            "SELECT id, url, platform, title, caption FROM links "
+            "WHERE url IS NOT NULL ORDER BY id"
         ).fetchall()
     logger.info("%d link(s) selected for forced re-parse", len(rows))
     return rows
@@ -982,10 +990,13 @@ def links_needing_geocode(db_path: str | Path) -> list:
 
     Collections are skipped: a roundup of eight venues has no single point, so
     a lookup would spend a request to record a failure that is not one.
+
+    `geocode_hint` is selected because it, not `location`, is what gets looked
+    up when one is set - see `app.jobs.backfill_geocode`.
     """
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, url, platform, title, location, region "
+            "SELECT id, url, platform, title, location, geocode_hint, region "
             "FROM links WHERE geocoded_at IS NULL AND NOT is_collection ORDER BY id"
         ).fetchall()
     logger.info("%d link(s) awaiting geocoding", len(rows))
@@ -993,10 +1004,23 @@ def links_needing_geocode(db_path: str | Path) -> list:
 
 
 def links_for_regeocode(db_path: str | Path) -> list:
-    """Every link with a location, ignoring the once-only marker."""
+    """Every placeable link, ignoring the once-only marker.
+
+    "Placeable" is the only filter, and it means the same thing here as it does
+    for the once-only path: collections are excluded, because a roundup of
+    eight venues has no single point and a forced run should not go back to
+    recording that as a failure. A link with neither a location nor a hint is
+    kept - the geocoder answers `no_location` without spending a request, which
+    is a truthful outcome to re-record.
+
+    `geocode_hint` is selected for the same reason as above: it wins over
+    `location` when set, and omitting it here was how a --force run could
+    overwrite coordinates that a hand-typed hint had just fixed.
+    """
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, url, platform, title, location, region FROM links ORDER BY id"
+            "SELECT id, url, platform, title, location, geocode_hint, region "
+            "FROM links WHERE NOT is_collection ORDER BY id"
         ).fetchall()
     logger.info("%d link(s) selected for forced re-geocoding", len(rows))
     return rows
