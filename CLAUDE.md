@@ -18,6 +18,7 @@ users allowlisted, Mini App opening from the Telegram group.
 | Feature | Status |
 |---|---|
 | Link intake (TikTok + Instagram, all URL shapes) | Done |
+| Forwarded channel posts saved automatically | Done |
 | Canonical URL resolution + dedup | Done |
 | Extraction chain (yt-dlp → oEmbed → screenshots) | Done |
 | Gemini parsing: title, location, dates, region, category, tags | Done |
@@ -159,6 +160,28 @@ Things that cost real debugging time. Read before touching related code.
    thumbnail through the vision path — cover frames usually carry text overlays
    with the dish, price, or venue.
 3. Only if both fail, ask the user for a screenshot.
+
+**Forwarded channel posts are a third intake route.** A post forwarded into
+the group from a Telegram channel is saved automatically. It has a caption and
+usually a photo, which is exactly what the parser already reads, so it goes
+through the *same* single Gemini call and the same closed taxonomy. What it
+lacks is a URL: nothing to canonicalise, nothing for yt-dlp, nothing for the
+Mini App to open. So it is stored the way a manual entry is, with `url` NULL,
+and `platform` set to `telegram` so the card can still say where it came from.
+
+- **Only channel forwards.** A forward from a person or a group is far more
+  likely to be conversation, and auto-saving every forwarded photo would fill
+  the list with things nobody chose to keep.
+- **Links win.** If the forwarded caption contains a TikTok or Instagram URL it
+  goes down the link path instead, which canonicalises and de-duplicates it
+  properly. The forward branch is only reached when there is no link.
+- **De-duplicated on the original post.** `canonical_url` holds
+  `tg://channel/<chat_id>/<message_id>` — the identity of the post in its
+  source channel, so the same thing forwarded twice, from either phone, lands
+  on one row. For a forwarded album the *lowest* slide id is used, so arrival
+  order cannot change the key.
+- A forwarded album is one entry and one Gemini call, buffered by
+  `media_group_id` like any other.
 
 **Photo and carousel posts** (TikTok slideshows, Instagram `/p/` posts) cannot
 be extracted at all. Do NOT scrape slide image URLs — fragile, and it sends the
@@ -377,8 +400,13 @@ path where a browser cannot downscale, not the normal case.
 
 ## Database
 
-`url` and `platform` are nullable. A **manual entry** — a place tried without
-a post behind it — is a row in `links` rather than a table of its own: it needs
+`url` and `platform` are nullable. `platform` is `tiktok` | `instagram` |
+`telegram` (a forwarded channel post) | NULL (a manual entry). Only the first
+two imply a URL; everything that re-reads a post filters on `url IS NOT NULL`
+rather than on the platform.
+
+A **manual entry** — a place tried without a post behind it — is a row in
+`links` rather than a table of its own: it needs
 the same fields, the same geocoding, and the planner must not be able to tell
 the difference. NULL is the honest value there; an empty string would be a URL
 that happens to be blank. The Mini App renders no "Open" button when there is
@@ -488,8 +516,10 @@ rows.
 
 ## Out of scope
 
-- No auto-scraping of TikTok/Instagram/Lemon8 feeds or hashtags. Only links the
-  users paste themselves. No bulk scraping, proxy rotation, or feed crawling.
+- No auto-scraping of TikTok/Instagram/Lemon8 feeds or hashtags. Only content
+  the users put in the group themselves: a link they paste, or a post they
+  forward in. No bulk scraping, proxy rotation, or feed crawling — and in
+  particular, nothing that reads a channel the bot was not forwarded from.
 - No native Android app, no Play Store distribution.
 - No paid hosting tiers without asking first — free-tier constraints are a
   deliberate design input, not an obstacle to engineer around.

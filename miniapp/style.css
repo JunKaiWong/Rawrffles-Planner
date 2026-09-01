@@ -1005,6 +1005,24 @@ body {
   color: #d2438f;
 }
 
+/* Forwarded in from a channel. Telegram blue, but the text tone is darkened
+ * for the light theme: the brand #2aabee only reaches 2.2:1 on white, well
+ * under AA for text this small. */
+.badge--telegram {
+  background: rgba(42, 171, 238, 0.16);
+  color: #1c7ab0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .badge--telegram {
+    color: #5ec2f5;
+  }
+}
+
+:root[data-theme="dark"] .badge--telegram {
+  color: #5ec2f5;
+}
+
 /* Outside the home region - kept, but not clustered into a Saturday plan. */
 .badge--daytrip {
   background: rgba(245, 159, 11, 0.2);

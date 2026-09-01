@@ -22,6 +22,8 @@ that only ever suggests places you actually chose.
 
 - **Automatic link intake** — paste a URL in the group; no commands or
   formatting required
+- **Forwarded channel posts** — forward a post from a Telegram channel and it
+  is saved and parsed the same way, no URL needed
 - **Multi-source extraction** — yt-dlp, TikTok's oEmbed API, and vision-based
   reading of user screenshots for posts that can't be scraped
 - **Structured parsing** — one LLM call per link produces title, location,
@@ -243,9 +245,10 @@ message after it waits.
 
 ## Scope
 
-This project only processes URLs its two users paste themselves. It does not
-scrape platform feeds, hashtags, or search results, and does not automate any
-platform account.
+This project only processes content its two users put into their own group
+themselves — a URL they paste, or a post they forward in. It does not scrape
+platform feeds, hashtags, or search results, and does not automate any platform
+account.
 
 ## Status
 

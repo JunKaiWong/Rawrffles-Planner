@@ -22,7 +22,9 @@
 const API_BASE = "/api";
 const TOKEN_STORAGE_KEY = "planner.devInitData";
 
-const PLATFORM_LABELS = { tiktok: "TikTok", instagram: "Instagram" };
+// "telegram" is a post forwarded in from a channel: no URL to open, but a
+// real source, unlike a manual entry which has none and gets no badge.
+const PLATFORM_LABELS = { tiktok: "TikTok", instagram: "Instagram", telegram: "Telegram" };
 
 // --- Telegram SDK, real or stubbed ---------------------------------------
 

@@ -19,7 +19,7 @@ import asyncio
 import logging
 import re
 
-from telegram import Update
+from telegram import MessageOriginChannel, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -67,7 +67,19 @@ _PLATFORM_BY_DOMAIN = {
     "instagr.am": "instagram",
 }
 
-PLATFORM_LABELS = {"tiktok": "TikTok", "instagram": "Instagram"}
+PLATFORM_LABELS = {
+    "tiktok": "TikTok",
+    "instagram": "Instagram",
+    # A post forwarded in from a channel. Not a link platform - there is no URL
+    # to open and nothing to extract - but a real source worth naming on the
+    # card, which a NULL platform (a manual entry) deliberately does not have.
+    "telegram": "Telegram",
+}
+
+# Source value for a forwarded channel post. Stored in `platform` so the Mini
+# App can badge where it came from; `url` stays NULL, because a forward is a
+# copy of a post, not an address anyone can open.
+FORWARD_PLATFORM = "telegram"
 
 # Telegram delivers an album as separate messages sharing a media_group_id,
 # and usually only one of them carries the caption. They arrive back-to-back,
@@ -120,6 +132,57 @@ def extract_links(text: str) -> list[tuple[str, str]]:
         seen.add(url)
         found.append((url, platform))
     return found
+
+
+# --- Forwarded channel posts ----------------------------------------------
+#
+# A post forwarded in from a channel is a third way content arrives, after a
+# pasted link and a hand-typed entry. It has a caption and usually a photo, and
+# both are exactly what the parser already reads - so it goes through the same
+# single Gemini call, returns the same JSON, and is held to the same closed
+# taxonomy. What it does not have is a URL: there is nothing for yt-dlp to
+# extract and nothing for the Mini App to open. So it is stored the way a
+# manual entry is, with `url` NULL, rather than pretending to be a link.
+#
+# Only channel forwards are taken. A forward from a person or a group is far
+# more likely to be conversation than something worth saving, and auto-saving
+# every forwarded photo would fill the list with things nobody chose to keep.
+
+
+def channel_forward_origin(message):
+    """The channel a message was forwarded from, or None if it is not one.
+
+    Bot API 7.0 replaced `forward_from_chat` with the `forward_origin` union;
+    a channel post is the MessageOriginChannel member. The isinstance check is
+    what excludes a forward from a user, a hidden user, or a group chat.
+    """
+    origin = getattr(message, "forward_origin", None)
+    if not isinstance(origin, MessageOriginChannel):
+        return None
+    return origin
+
+
+def forward_identity(origin) -> str:
+    """A stable dedup key for one channel post.
+
+    The channel id plus the post's own message id identifies the original, so
+    forwarding the same post twice - from either phone - lands on the same key
+    and de-duplicates the way a canonical URL does for a link. It is stored in
+    `canonical_url`, which is the column that already means "the identity we
+    de-duplicate on"; the tg:// scheme keeps it from ever colliding with a real
+    http URL.
+    """
+    return f"tg://channel/{origin.chat.id}/{origin.message_id}"
+
+
+def forward_source_name(origin) -> str:
+    """What to call the channel in the confirmation."""
+    chat = getattr(origin, "chat", None)
+    return (
+        getattr(chat, "title", None)
+        or getattr(chat, "username", None)
+        or "a channel"
+    )
 
 
 def _platform_label(platform: str) -> str:
@@ -198,6 +261,12 @@ async def _flush_media_group(context) -> None:
     )
 
     if not extract_links(caption or ""):
+        # A forwarded album: every slide is model input for one call, exactly
+        # as a screenshotted slideshow is.
+        origin = pending.get("origin")
+        if origin is not None and photos:
+            await _run_forward_intake(context, message, origin, caption or "", photos)
+            return
         # An ordinary photo album with no link in any caption: not ours.
         logger.info("media group %s has no supported link; ignoring", key[1])
         return
@@ -216,8 +285,24 @@ async def _buffer_media_group(context, message) -> None:
     pending = _pending_media_groups.get(key)
 
     if pending is None:
-        pending = {"photos": [], "caption": None, "message": message, "job": None}
+        pending = {
+            "photos": [],
+            "caption": None,
+            "message": message,
+            "job": None,
+            "origin": None,
+        }
         _pending_media_groups[key] = pending
+
+    # Each slide of a forwarded album carries its own origin, pointing at its
+    # own post in the source channel. The lowest message id is the album's
+    # first slide, so keying on it gives the same identity however the slides
+    # happen to arrive - and therefore the same identity on a re-forward.
+    origin = channel_forward_origin(message)
+    if origin is not None:
+        current = pending["origin"]
+        if current is None or origin.message_id < current.message_id:
+            pending["origin"] = origin
 
     if sizes and sizes[0] not in {full for full, _ in pending["photos"]}:
         pending["photos"].append(sizes)
@@ -477,12 +562,166 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = message.text or message.caption or ""
     sizes = photo_sizes(message)
     if not extract_links(text):
+        # Checked only after links: a forwarded post whose caption carries a
+        # TikTok URL is a link first, and should go down the path that
+        # canonicalises and de-duplicates it.
+        origin = channel_forward_origin(message)
+        if origin is not None and sizes:
+            await _run_forward_intake(context, message, origin, text, [sizes])
+            return
         # A lone photo with no link: the filter admits photos so album members
         # without captions can be buffered, so this is the expected non-match.
         logger.debug("message_id=%s has no supported link; ignoring", message.message_id)
         return
 
     await _run_intake(context, message, text, [sizes] if sizes else [])
+
+
+async def _run_forward_intake(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+    origin,
+    caption: str,
+    photos: list[tuple[str, str | None]],
+) -> None:
+    """Save a post forwarded in from a channel, and confirm what was stored.
+
+    The parse is the existing one, unchanged: caption text and the photo go to
+    Gemini together in a single call and come back as the same JSON, held to
+    the same closed taxonomy. Only the intake differs - there is no URL to
+    canonicalise, no yt-dlp step, and no oEmbed fallback, because a forward
+    already carries its own content.
+
+    Photos are `intake`: they are what the model reads, not souvenirs. A
+    forward is the post itself rather than a picture of a visit.
+    """
+    db_path = context.bot_data["db_path"]
+    user = message.from_user
+    added_by = user.id if user else 0
+    canonical = forward_identity(origin)
+    source = forward_source_name(origin)
+
+    logger.info(
+        "forward intake: chat=%s message_id=%s from=%s channel=%r identity=%s "
+        "photos=%d caption_len=%d",
+        message.chat.id,
+        message.message_id,
+        added_by,
+        source,
+        canonical,
+        len(photos),
+        len(caption),
+    )
+
+    try:
+        existing = find_link_by_canonical_url(db_path, canonical)
+        if existing is not None:
+            logger.info(
+                "duplicate forward: %s already stored as id=%s",
+                canonical,
+                existing["id"],
+            )
+            await _reply(
+                message,
+                f"Already saved:\n  #{existing['id']} forwarded from {source}",
+            )
+            return
+
+        try:
+            await message.chat.send_action(ChatAction.TYPING)
+        except Exception:  # noqa: BLE001 - cosmetic only
+            logger.debug("could not send typing action", exc_info=True)
+
+        images = await _download_images(context, photos) if photos else []
+
+        link_id = insert_link(
+            db_path,
+            # No URL, deliberately: NULL is the honest value for a post with no
+            # address, and the Mini App already renders no "Open" without one.
+            url=None,
+            platform=FORWARD_PLATFORM,
+            added_by=added_by,
+            canonical_url=canonical,
+            caption=caption or None,
+        )
+        if photos:
+            add_link_photos(
+                db_path, link_id, photos, kind=PHOTO_INTAKE, added_by=added_by
+            )
+
+        class _Meta:  # the shape _parse_and_store expects
+            caption = None
+            title = None
+            thumbnail = None
+
+        meta = _Meta()
+        meta.caption = caption or None
+
+        parsed = None
+        if caption or images:
+            parsed = await _parse_and_store(
+                context, db_path, link_id, FORWARD_PLATFORM, meta, images
+            )
+        else:
+            # Nothing to read at all. The row is still worth keeping - it is
+            # something someone deliberately forwarded - but say so plainly.
+            logger.info("forward id=%s had no caption and no image to parse", link_id)
+
+        await _reply(
+            message,
+            _summarise_forward(link_id, source, parsed, len(images), bool(caption)),
+        )
+    except Exception:
+        logger.exception("failed to store forward %s", canonical)
+        await _reply(
+            message,
+            f"Could not save that forward from {source} - check the logs.",
+        )
+
+
+def _summarise_forward(
+    link_id: int, source: str, parsed, image_count: int, had_caption: bool
+) -> str:
+    """Confirmation for a saved forward, in the same shape link intake uses."""
+    headline = (parsed.title if parsed and parsed.title else None) or "(no title found)"
+    lines = [
+        "Saved 1 forwarded post:",
+        f"  #{link_id} {_platform_label(FORWARD_PLATFORM)} - {headline}",
+        f"     forwarded from {source}",
+    ]
+    # Name the sources that actually existed. Saying "read from the caption"
+    # when the post had none is the same class of error as reporting a stage
+    # instead of an outcome: it describes the code's shape, not what happened.
+    if image_count or had_caption:
+        images = (
+            ("the image" if image_count == 1 else f"{image_count} images")
+            if image_count
+            else ""
+        )
+        if had_caption and images:
+            read_from = f"the caption and {images}"
+        elif images:
+            read_from = images
+        else:
+            read_from = "the caption"
+        lines.append(f"     read from {read_from}")
+    if parsed:
+        lines.extend(_summarise_parsed(parsed))
+    # Report the outcome, not the stage: only say nothing was read when the
+    # parse genuinely learned nothing from either source.
+    if not _parse_yielded_content(parsed):
+        lines.append("     saved, but nothing could be read from it")
+        lines.append("     (edit it in the app to fill in the details)")
+    return "\n".join(lines)
+
+
+async def _reply(message, text: str) -> None:
+    """Send one confirmation. Never raises - a failed reply must not undo a save."""
+    try:
+        # No parse_mode: captions are user input and would need escaping.
+        await message.reply_text(text, disable_web_page_preview=True)
+    except Exception:
+        logger.exception("could not send confirmation for message_id=%s", message.message_id)
 
 
 async def _run_intake(
