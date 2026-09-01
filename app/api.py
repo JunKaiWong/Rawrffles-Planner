@@ -52,6 +52,7 @@ from app.db.database import (
     add_uploaded_photo,
     claim_update,
     create_manual_link,
+    delete_link,
     delete_link_photo,
     delete_date,
     get_date,
@@ -1251,6 +1252,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"photo {photo_id} not found on link {link_id}",
             )
         logger.info("user %s deleted photo %s from link %s", user.id, photo_id, link_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.delete(
+        "/api/links/{link_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["links"],
+        summary="Delete an entry and its photos",
+        dependencies=[Depends(init_data_scheme)],
+    )
+    async def remove_link(
+        link_id: Annotated[int, PathParam(ge=1, description="Link id")],
+        user: Annotated[TelegramUser, Depends(current_user)],
+    ) -> Response:
+        """Delete one entry outright.
+
+        Irreversible, and there is no soft-delete tier behind it: the rating, the
+        note and any uploaded visit photos go with the row, and uploaded photos
+        exist nowhere else - their bytes are in `link_photos`, not on Telegram.
+        The Mini App therefore confirms first, and says what is about to be lost.
+
+        A photo that arrived through the group keeps its Telegram message; this
+        removes the app's reference to it, not the couple's chat history.
+        """
+        deleted, photos = await asyncio.to_thread(
+            delete_link, settings.db_path, link_id
+        )
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"link {link_id} not found",
+            )
+        logger.info(
+            "user %s deleted link %s and %d photo(s)", user.id, link_id, photos
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.patch(

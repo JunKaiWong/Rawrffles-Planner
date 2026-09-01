@@ -953,6 +953,41 @@ def update_link(
     return get_link(db_path, link_id)
 
 
+def delete_link(db_path: str | Path, link_id: int) -> tuple[bool, int]:
+    """Delete a link and every photo attached to it.
+
+    Returns (deleted, photos_removed); `deleted` is False when there was no
+    such link, so the caller can 404 rather than report a success that removed
+    nothing.
+
+    **The photos are deleted explicitly rather than by cascade.** link_photos
+    declares ON DELETE CASCADE, and Postgres honours it - but SQLite enforces
+    foreign keys only when `PRAGMA foreign_keys = ON` is set per connection,
+    and this app never sets it. So the same delete would cascade in production
+    and orphan rows locally: photo rows pointing at a link id that no longer
+    exists, invisible to every query and impossible to reach from the app.
+    Deleting them here makes both engines behave identically, and does so
+    without depending on a pragma someone must remember to keep switched on.
+
+    Both statements share one transaction, so a failure between them cannot
+    leave a link whose photos are already gone.
+    """
+    with connect(db_path) as conn:
+        photos = conn.execute(
+            "DELETE FROM link_photos WHERE link_id = ?", (link_id,)
+        ).rowcount
+        deleted = (
+            conn.execute("DELETE FROM links WHERE id = ?", (link_id,)).rowcount > 0
+        )
+    logger.info(
+        "delete link id=%s -> %s, %d photo(s) removed",
+        link_id,
+        "removed" if deleted else "no such link",
+        photos,
+    )
+    return deleted, photos
+
+
 def save_geocode(
     db_path: str | Path,
     link_id: int,

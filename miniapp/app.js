@@ -189,6 +189,7 @@ const els = {
   rating: document.getElementById("rating"),
   note: document.getElementById("note"),
   saveBtn: document.getElementById("save-btn"),
+  entryDelete: document.getElementById("entry-delete"),
   sheetPhotos: document.getElementById("sheet-photos"),
   sheetTitle: document.getElementById("sheet-title"),
   entryFields: document.getElementById("entry-fields"),
@@ -342,6 +343,7 @@ const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
 const createLink = (body) => api("/links", { method: "POST", body: JSON.stringify(body) });
+const removeLink = (id) => api(`/links/${id}`, { method: "DELETE" });
 const fetchTaxonomy = () => api("/taxonomy");
 const deletePhoto = (linkId, photoId) =>
   api(`/links/${linkId}/photos/${photoId}`, { method: "DELETE" });
@@ -927,6 +929,11 @@ function openSheet(link, mode = "done") {
   els.entryFields.hidden = !editing;
   els.entryDoneField.hidden = mode !== "create" && mode !== "edit";
   els.entryCollectionField.hidden = els.entryDoneField.hidden;
+  // Edit only. "create" has nothing to delete yet, and the done sheet is a
+  // deliberate two-tap flow that should not grow a destructive button.
+  els.entryDelete.hidden = mode !== "edit" || !link;
+  els.entryDelete.disabled = false;
+  els.entryDelete.textContent = "Delete";
   els.sheetTitle.textContent =
     mode === "create" ? "Add a place" : mode === "edit" ? "Edit" : "Mark as done";
   els.sheetPlace.textContent = link ? displayTitle(link) : "Somewhere with no link";
@@ -1723,6 +1730,86 @@ els.photoInput.addEventListener("change", () => addPhotos([...els.photoInput.fil
 els.addManual.addEventListener("click", () => openSheet(null, "create"));
 
 els.entryCollection.addEventListener("change", syncCollectionFields);
+
+// Telegram's own confirm dialog, so it matches the client's theme and sits
+// where the user expects. showConfirm is Bot API 6.2; an older client falls
+// back to the browser's, which is uglier but equally blocking - the one thing
+// that must not happen is a destructive action proceeding unasked because the
+// method was missing.
+// "3 photos, the rating and the note" - an Oxford-comma-free list, because
+// this is prose in a dialog rather than data.
+function listWords(items) {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+function confirmAction(message) {
+  return new Promise((resolve) => {
+    if (typeof tg.showConfirm === "function") {
+      try {
+        tg.showConfirm(message, (ok) => resolve(!!ok));
+        return;
+      } catch (err) {
+        console.warn("[planner] showConfirm unavailable, falling back", err);
+      }
+    }
+    resolve(window.confirm(message));
+  });
+}
+
+// A deleted link's photos are gone from the server, so the cached blob URLs
+// for them are pointing at nothing. Revoking releases the bytes the browser is
+// still holding; dropping the entries stops a recycled id serving a stale image.
+function forgetPhotos(linkId) {
+  const prefix = `/links/${linkId}/photos/`;
+  [...photoUrls.keys()]
+    .filter((path) => path.startsWith(prefix))
+    .forEach((path) => {
+      Promise.resolve(photoUrls.get(path))
+        .then((url) => URL.revokeObjectURL(url))
+        .catch(() => {});
+      photoUrls.delete(path);
+    });
+}
+
+els.entryDelete.addEventListener("click", async () => {
+  const link = state.pending;
+  if (!link) return;
+
+  // Name what goes with it. "Are you sure?" tells someone nothing they did not
+  // already know; the photo count is the part that is easy to forget, because
+  // an uploaded photo exists nowhere else - not on Telegram, not in the chat.
+  const photoCount = (link.photos || []).length;
+  const alsoGone = [];
+  if (photoCount) alsoGone.push(`${photoCount} photo${photoCount === 1 ? "" : "s"}`);
+  if (link.rating) alsoGone.push("the rating");
+  if (link.note) alsoGone.push("the note");
+  const message =
+    `Delete "${displayTitle(link)}"?` +
+    (alsoGone.length ? `\n\nThis also deletes ${listWords(alsoGone)}.` : "") +
+    "\n\nThis cannot be undone.";
+
+  if (!(await confirmAction(message))) return;
+
+  els.entryDelete.disabled = true;
+  els.entryDelete.textContent = "Deleting…";
+  try {
+    await removeLink(link.id);
+    forgetPhotos(link.id);
+    state.links = state.links.filter((item) => item.id !== link.id);
+    state.selected.delete(link.id);
+    closeSheet();
+    tg.HapticFeedback.impactOccurred("medium");
+    render();
+    // After render, not before: rendering an empty tab sets its own status
+    // ("Nothing marked done yet."), which would otherwise swallow this.
+    setStatus("Entry deleted.", "info");
+  } catch (err) {
+    els.entryDelete.disabled = false;
+    els.entryDelete.textContent = "Delete";
+    setStatus(err.message, "error");
+  }
+});
 
 els.entryCategory.addEventListener("click", (event) => {
   const chip = event.target.closest("button[data-entry-category]");

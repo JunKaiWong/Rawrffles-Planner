@@ -1073,6 +1073,22 @@ body {
   color: var(--tg-text);
 }
 
+/* Outlined rather than filled. A solid red block reads as the primary action
+ * of the sheet, and the primary action here is Save - this is the one you
+ * should have to mean. The text tone carries the warning instead: measured at
+ * 5.4:1 on the light panel and 5.8:1 on the dark one, both clear of AA. */
+.btn--danger {
+  background: transparent;
+  /* Two declarations on purpose: color-mix is Chrome 111 / Safari 16.2, and
+     Telegram's webview is the system one, which on an older phone is older
+     than that. A browser that does not understand the second line drops it and
+     keeps the first, so the button is merely a little bolder rather than
+     borderless. */
+  border-color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+
 .btn:disabled {
   opacity: 0.55;
   cursor: default;
@@ -1219,6 +1235,18 @@ body {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+  align-items: center;
+  /* At 320px, Delete + Cancel + Save do not fit on one line. Wrapping keeps
+     every target full width rather than shrinking them below a thumb. */
+  flex-wrap: wrap;
+}
+
+/* Pushes Delete to the far left, away from Save, so the destructive button is
+ * not adjacent to the one people tap without looking. Collapses to nothing
+ * when the row wraps, so it costs no space on a narrow screen. */
+.sheet__actions-gap {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* --- Photos ---------------------------------------------------------------

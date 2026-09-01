@@ -329,7 +329,19 @@
         <input type="file" id="photo-input" accept="image/*" multiple hidden />
       </div>
 
+      <!--
+        Delete lives here rather than on the card, deliberately. On a card it
+        would sit a thumb's width from Done, which is tapped constantly, and
+        the two are not equally recoverable: Done is one tap to undo, this
+        destroys the rating, the note and any uploaded photos for good. Behind
+        Edit it takes an intent to reach, and the confirm names what goes with
+        it. Same placement as the date sheet's Delete, for the same reason.
+      -->
       <div class="sheet__actions">
+        <button type="button" class="btn btn--danger btn--sm" id="entry-delete" hidden>
+          Delete
+        </button>
+        <span class="sheet__actions-gap"></span>
         <button type="button" class="btn btn--ghost" data-close="1">Cancel</button>
         <button type="submit" class="btn btn--primary" id="save-btn">Save</button>
       </div>
