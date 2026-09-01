@@ -598,18 +598,33 @@ because both were shipped once:
   talk the app out of it.
 
 - **A phone cannot force a reload, so stale assets are invisible and
-  permanent.** `StaticFiles` sends `etag` and `last-modified` but no
-  `Cache-Control`, which lets a client apply heuristic caching and serve an old
-  file without asking. Telegram's webview has no reload button and no per-origin
-  cache clear, so a deploy can appear to have changed nothing — and the three
-  files go stale independently, which is worse than a stale page: a fresh
-  `index.html` carrying a new element plus a cached `app.js` that knows nothing
-  about it leaves that element in the DOM with its initial `hidden` attribute
-  and nothing to remove it. That is a button which exists on desktop and is
-  simply absent on the phone. The mount therefore sends `Cache-Control:
-  no-cache` — revalidate, not "do not store" — so the ETag turns the usual
-  request into a 0-byte 304. Never diagnose "it works on desktop but not on my
-  phone" as a layout bug before checking which files the phone actually has.
+  permanent — and headers alone will not fix it.** Telegram's webview has no
+  reload button and no per-origin cache clear, so a deploy can appear to have
+  changed nothing. The files also go stale independently, which is worse than a
+  stale page: a fresh `index.html` carrying a new element plus a cached
+  `app.js` that knows nothing about it leaves that element in the DOM with its
+  initial `hidden` attribute and nothing to remove it. **The signature is that
+  everything the new JavaScript *adds* is missing at once** — a button, a
+  label, an anchor — while the same build is perfect on a desktop.
+
+  `Cache-Control: no-cache` was tried first and **was not enough**: the webview
+  kept serving its own copy, cleared cache included. A client that ignores
+  revalidation cannot be talked round by another header. So the URL changes
+  instead. `/miniapp/` is served by a route rather than by `StaticFiles`, and
+  it rewrites index.html's two asset references to `app.js?v=<hash>` and
+  `style.css?v=<hash>`, the hash being eight hex characters of that file's
+  SHA-256. A changed file is a URL no cache has ever seen; an unchanged one is
+  the URL it already holds. Requests carrying `?v=` are answered `immutable`
+  for a year, since that URL can only ever mean those bytes; a bare request
+  still gets `no-cache`.
+
+  **Diagnose in this order.** When something works on a desktop and not on the
+  phone, first establish *which build the phone has*: tap the subtitle five
+  times for a readout (build, Telegram version and platform, viewport, insets,
+  the measured state of the element in question, `color-mix` support, user
+  agent) and compare its build with `/health`. Only once those agree is it
+  worth looking at layout. Three rounds of this were spent on layout theories
+  for what was a delivery problem.
 
 - **Scroll chaining is a touch behaviour and does not reproduce on a desktop.**
   A flick that reaches the end of a sheet keeps going and scrolls the list
