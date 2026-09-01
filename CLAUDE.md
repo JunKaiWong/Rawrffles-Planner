@@ -597,6 +597,29 @@ because both were shipped once:
   floor, so a client reporting zero for an inset the browser knows about cannot
   talk the app out of it.
 
+- **A phone cannot force a reload, so stale assets are invisible and
+  permanent.** `StaticFiles` sends `etag` and `last-modified` but no
+  `Cache-Control`, which lets a client apply heuristic caching and serve an old
+  file without asking. Telegram's webview has no reload button and no per-origin
+  cache clear, so a deploy can appear to have changed nothing — and the three
+  files go stale independently, which is worse than a stale page: a fresh
+  `index.html` carrying a new element plus a cached `app.js` that knows nothing
+  about it leaves that element in the DOM with its initial `hidden` attribute
+  and nothing to remove it. That is a button which exists on desktop and is
+  simply absent on the phone. The mount therefore sends `Cache-Control:
+  no-cache` — revalidate, not "do not store" — so the ETag turns the usual
+  request into a 0-byte 304. Never diagnose "it works on desktop but not on my
+  phone" as a layout bug before checking which files the phone actually has.
+
+- **Scroll chaining is a touch behaviour and does not reproduce on a desktop.**
+  A flick that reaches the end of a sheet keeps going and scrolls the list
+  behind it, so closing the sheet reveals the list somewhere else entirely.
+  `overscroll-behavior: contain` on the scrolling panel is the fix; a mouse
+  wheel will not demonstrate either the bug or the fix, so verify it on a
+  phone. For an overlay that does not scroll at all — the backdrop, the photo
+  viewer — `overscroll-behavior` does nothing, because it only applies to
+  scroll containers; `touch-action: none` is what refuses the gesture there.
+
 - **`hidden` loses to `display`.** An element with `display: flex` of its own
   stays on screen when the attribute is set, silently. This caused three
   separate bugs — a photo viewer painting over the list, and the links list

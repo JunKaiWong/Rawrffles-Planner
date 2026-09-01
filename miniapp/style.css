@@ -178,6 +178,9 @@ body {
   gap: 8px;
   margin: 12px 16px 0;
   overflow-x: auto;
+  /* Same chaining problem, one axis over: flicking past the last card would
+     otherwise start moving the page sideways. */
+  overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
 
@@ -451,6 +454,12 @@ body {
      handled by the panel's own padding. */
   max-height: calc(86vh - var(--safe-top));
   overflow-y: auto;
+  /* Stop the scroll chaining to the list behind once this reaches its end.
+     Without it, the last flick inside a sheet keeps going and moves the page
+     underneath, so closing the sheet reveals a list scrolled somewhere else.
+     Covers the entry sheet (done, edit and create are one element), the date
+     sheet and the plan sheet, which all share this class. */
+  overscroll-behavior: contain;
 }
 
 .plan__summary {
@@ -1145,6 +1154,11 @@ body {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.45);
+  /* The backdrop is not itself scrollable, so overscroll-behavior would do
+     nothing here - a drag on it pans the nearest scrollable ancestor, which is
+     the page. touch-action is what refuses the gesture outright. Taps still
+     land, so tapping outside still closes the sheet. */
+  touch-action: none;
 }
 
 .sheet__panel {
@@ -1332,6 +1346,10 @@ body {
   position: fixed;
   inset: 0;
   z-index: 50;
+  /* A full-screen overlay with nothing to scroll: dragging it should do
+     nothing at all, rather than moving the list underneath. */
+  touch-action: none;
+  overscroll-behavior: contain;
   display: flex;
   align-items: center;
   justify-content: center;

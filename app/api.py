@@ -129,6 +129,35 @@ PUBLIC_PREFIXES = ("/miniapp",)
 
 MINIAPP_DIR = PROJECT_ROOT / "miniapp"
 
+
+class RevalidatedStatic(StaticFiles):
+    """Serve the Mini App's files, but make the browser check they are current.
+
+    StaticFiles sends `etag` and `last-modified` and no `Cache-Control` at all.
+    With no explicit freshness a client is free to apply *heuristic* caching -
+    commonly a tenth of the file's age - and serve a stale copy without asking
+    the server anything. On a phone that is invisible and unfixable from the
+    user's side: Telegram's webview has no reload button and no way to clear a
+    single origin, so a deploy can appear to have done nothing.
+
+    The failure is worse than a stale page, because the three files go stale
+    independently. index.html carrying a new element while a cached app.js
+    knows nothing about it leaves that element sitting in the DOM with its
+    initial `hidden` attribute and nothing to remove it - the markup ships, the
+    behaviour does not, and the button is simply absent on the phone while
+    being present on every desktop that happened to fetch both together.
+
+    `no-cache` does not mean "do not store": it means "revalidate before use".
+    The ETag above then makes the usual answer a 304 with no body, so this
+    costs one conditional request per file per load and cannot serve a version
+    of the app that the server no longer has.
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 # Declared so Swagger UI shows an Authorize button and sends the header. This
 # is documentation of the real check, not the check itself - the middleware
 # enforces it regardless of what any route declares.
@@ -774,7 +803,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if MINIAPP_DIR.is_dir():
         app.mount(
             "/miniapp",
-            StaticFiles(directory=MINIAPP_DIR, html=True),
+            RevalidatedStatic(directory=MINIAPP_DIR, html=True),
             name="miniapp",
         )
         logger.info("serving Mini App from %s at /miniapp", MINIAPP_DIR)
