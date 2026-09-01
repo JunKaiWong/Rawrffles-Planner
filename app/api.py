@@ -18,8 +18,12 @@ Run locally:  python -m app.api        (then open http://127.0.0.1:8000/docs)
 """
 
 import asyncio
+import hashlib
 import hmac
 import logging
+import os
+import re
+import subprocess
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -100,6 +104,40 @@ logger = logging.getLogger(__name__)
 # downscaling was unavailable.
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 
+
+def _app_version() -> str:
+    """Which commit is running, for answering "is the phone on the new code?".
+
+    That question has now cost two rounds of remote debugging, because a Mini
+    App on a phone has no devtools, no reload button, and no way to show what
+    it loaded. Render exports the commit as an environment variable; locally
+    there is a git checkout to ask. Neither is a secret - it is a commit id in
+    a repository the two users own - and /health is public precisely so this
+    can be checked without credentials.
+    """
+    for name in ("RENDER_GIT_COMMIT", "GIT_COMMIT", "SOURCE_VERSION"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value[:12]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        logger.debug("no git checkout to read a version from", exc_info=True)
+    return "unknown"
+
+
+# Resolved once: it cannot change while the process is alive, and /health is
+# hit every few minutes by the uptime monitor.
+APP_VERSION = _app_version()
+
 INIT_DATA_HEADER = "X-Telegram-Init-Data"
 
 # Paths that skip authentication. Deliberately tiny: the interactive docs must
@@ -153,10 +191,79 @@ class RevalidatedStatic(StaticFiles):
     of the app that the server no longer has.
     """
 
-    def file_response(self, *args, **kwargs) -> Response:
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+    def file_response(self, full_path, stat_result, scope, *args, **kwargs) -> Response:
+        response = super().file_response(full_path, stat_result, scope, *args, **kwargs)
+        # A request carrying ?v= asked for one specific build of this file, and
+        # the query changes whenever the bytes do - so that answer really can be
+        # kept forever. Anything else has to be revalidated, because the URL
+        # alone does not say which version the caller ended up with.
+        if b"v=" in (scope.get("query_string") or b""):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+# --- Cache busting --------------------------------------------------------
+#
+# `Cache-Control: no-cache` was not enough. A deployed change to app.js kept
+# not reaching the phone, which showed an interface missing every element the
+# new JavaScript adds - a Delete button, an Open button, a corrected badge
+# label - while the same build was correct on a desktop. A webview that ignores
+# revalidation cannot be talked round by another header.
+#
+# So the URL itself changes instead. index.html is served with a short content
+# hash appended to its two asset references, and that hash changes exactly when
+# the file's bytes do: a new deploy asks for a URL no cache has ever seen, and
+# an unchanged deploy asks for the one it already holds. This is the only
+# approach that does not depend on the client cooperating.
+
+_ASSET_REF = re.compile(rb'(src|href)="(app\.js|style\.css)"')
+_index_cache: dict[str, object] = {}
+
+
+def _asset_fingerprint(name: str) -> str:
+    """Eight hex characters of the file's SHA-256, or its mtime if unreadable."""
+    path = MINIAPP_DIR / name
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+    except OSError:
+        logger.warning("could not fingerprint %s; falling back to mtime", name)
+        try:
+            return f"{int(path.stat().st_mtime):x}"
+        except OSError:
+            return "0"
+
+
+def _versioned_index() -> bytes:
+    """index.html with ?v=<hash> on app.js and style.css.
+
+    Recomputed only when one of the three files changes on disk, so the normal
+    request reads nothing: this is on the path of every Mini App open.
+    """
+    paths = [MINIAPP_DIR / n for n in ("index.html", "app.js", "style.css")]
+    try:
+        stamp = tuple(p.stat().st_mtime_ns for p in paths)
+    except OSError:
+        stamp = None
+    if stamp is not None and _index_cache.get("stamp") == stamp:
+        return _index_cache["body"]  # type: ignore[return-value]
+
+    versions = {b"app.js": _asset_fingerprint("app.js").encode(),
+                b"style.css": _asset_fingerprint("style.css").encode()}
+
+    def stamp_ref(match: "re.Match[bytes]") -> bytes:
+        attr, name = match.group(1), match.group(2)
+        return b'%s="%s?v=%s"' % (attr, name, versions[name])
+
+    body = _ASSET_REF.sub(stamp_ref, (MINIAPP_DIR / "index.html").read_bytes())
+    _index_cache.update(stamp=stamp, body=body)
+    logger.info(
+        "Mini App index built: app.js?v=%s style.css?v=%s",
+        versions[b"app.js"].decode(),
+        versions[b"style.css"].decode(),
+    )
+    return body
 
 # Declared so Swagger UI shows an Authorize button and sends the header. This
 # is documentation of the real check, not the check itself - the middleware
@@ -712,7 +819,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exists on a host that sleeps. Starlette discards the body for HEAD, so
         one handler serves both.
         """
-        return {"status": "ok"}
+        return {"status": "ok", "version": APP_VERSION}
 
     @app.post(
         TELEGRAM_WEBHOOK_PATH,
@@ -801,6 +908,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Serve the Mini App from the same origin as the API so browser requests
     # need no CORS handling and Telegram loads one host.
     if MINIAPP_DIR.is_dir():
+
+        @app.get("/miniapp", include_in_schema=False)
+        @app.get("/miniapp/", include_in_schema=False)
+        async def miniapp_index() -> Response:
+            """Serve index.html with fingerprinted asset URLs.
+
+            Declared before the mount so it wins: StaticFiles(html=True) would
+            otherwise serve the file verbatim, references and all.
+            """
+            return Response(
+                content=_versioned_index(),
+                media_type="text/html",
+                headers={"Cache-Control": "no-cache"},
+            )
+
         app.mount(
             "/miniapp",
             RevalidatedStatic(directory=MINIAPP_DIR, html=True),

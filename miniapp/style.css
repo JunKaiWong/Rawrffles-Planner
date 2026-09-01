@@ -109,6 +109,24 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* While any sheet or the photo viewer is open, the page behind must not
+   scroll at all. overscroll-behavior on the panel only stops a scroll that
+   *started* in the panel from chaining once it hits the end - the document
+   itself stays scrollable, so a touch that lands anywhere else still moves the
+   list, and closing the sheet reveals it somewhere new.
+
+   position: fixed rather than overflow: hidden, because overflow: hidden on the
+   root scroller is ignored by mobile Safari; the offset preserves the scroll
+   position, which is restored on unlock. */
+html.is-locked body {
+  position: fixed;
+  top: var(--locked-top, 0px);
+  left: 0;
+  right: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
 /* --- Dev banner --- */
 
 .dev-banner {
@@ -1266,19 +1284,28 @@ body {
 .sheet__actions {
   display: flex;
   gap: 8px;
-  justify-content: flex-end;
   align-items: center;
   /* At 320px, Delete + Cancel + Save do not fit on one line. Wrapping keeps
      every target full width rather than shrinking them below a thumb. */
   flex-wrap: wrap;
+  /* NOT flex-end, and the reason is a failure mode rather than a taste call.
+     The panel computes overflow-x to auto (a scroll container with
+     overflow-y: auto does), and with flex-end any content too wide for the row
+     overflows past the *start* edge - which cannot be scrolled to, because
+     scroll offsets do not go negative. The first item is then invisible and
+     unreachable while the last two look perfectly fine. The first item here is
+     Delete. space-between puts any overflow past the end edge instead, where
+     it is at least reachable, and keeps Delete pinned to the left away from
+     Save either way. */
+  justify-content: space-between;
 }
 
-/* Pushes Delete to the far left, away from Save, so the destructive button is
- * not adjacent to the one people tap without looking. Collapses to nothing
- * when the row wraps, so it costs no space on a narrow screen. */
-.sheet__actions-gap {
-  flex: 1 1 auto;
-  min-width: 0;
+/* Cancel and Save travel together at the end; Delete sits alone at the start. */
+.sheet__actions-end {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
 }
 
 /* --- Photos ---------------------------------------------------------------

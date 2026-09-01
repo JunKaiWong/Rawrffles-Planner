@@ -146,6 +146,9 @@ const CATEGORY_LABELS = {
 const state = {
   links: [],
   dates: [],
+  // Which build is running, read from /health. Reported by the diagnostics
+  // gesture, so "is the phone on the code I just deployed?" is answerable.
+  version: null,
   tab: "todo",
   category: "all",
   subcategory: "all",
@@ -2122,6 +2125,115 @@ function watchSafeArea() {
   );
 }
 
+// --- Scroll lock ----------------------------------------------------------
+//
+// While any overlay is open the page behind must not scroll. This is separate
+// from `overscroll-behavior: contain` on the panel, which only stops a scroll
+// that STARTED in the panel from chaining once it reaches the end - the
+// document itself stays scrollable, so a touch landing anywhere else still
+// moves the list, and closing the sheet reveals it somewhere new.
+//
+// Driven by a MutationObserver on the overlays' `hidden` attribute rather than
+// by each open/close site, because there are nine of those and the tenth would
+// be the one that forgot.
+
+const OVERLAY_IDS = ["sheet", "date-sheet", "day-sheet", "plan-sheet", "photo-viewer"];
+let lockedScrollY = 0;
+
+function anyOverlayOpen() {
+  return OVERLAY_IDS.some((id) => {
+    const el = document.getElementById(id);
+    return el && !el.hidden;
+  });
+}
+
+function setScrollLock(locked) {
+  const root = document.documentElement;
+  if (locked === root.classList.contains("is-locked")) return;
+  if (locked) {
+    lockedScrollY = window.scrollY || 0;
+    root.style.setProperty("--locked-top", `-${lockedScrollY}px`);
+    root.classList.add("is-locked");
+  } else {
+    root.classList.remove("is-locked");
+    root.style.removeProperty("--locked-top");
+    // The body was taken out of flow, so the page is back at the top until
+    // this puts it back where it was.
+    window.scrollTo(0, lockedScrollY);
+  }
+}
+
+function watchOverlays() {
+  const observer = new MutationObserver(() => setScrollLock(anyOverlayOpen()));
+  OVERLAY_IDS.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) observer.observe(el, { attributes: true, attributeFilter: ["hidden"] });
+  });
+}
+
+// --- On-device diagnostics ------------------------------------------------
+//
+// A phone cannot open devtools, so when something renders correctly on a
+// desktop and not in Telegram there is otherwise nothing to go on but
+// guesswork. Five taps on the subtitle reports what this device actually has:
+// which build is loaded, which client and engine, and the measured state of
+// the button that has gone missing. Deliberately reachable but not
+// discoverable - it costs nothing and is never in the way.
+
+let diagnosticTaps = 0;
+let diagnosticTimer = null;
+
+function describeEnvironment() {
+  const del = els.entryDelete;
+  const rect = del ? del.getBoundingClientRect() : null;
+  const panel = document.querySelector(".sheet__panel--tall");
+  const lines = [
+    `build ${state.version || "unknown"}`,
+    `telegram ${tg.version || "?"} on ${tg.platform || "?"}`,
+    `viewport ${window.innerWidth}x${window.innerHeight}`,
+    `insets t${getComputedStyle(document.documentElement).getPropertyValue("--safe-top").trim()}` +
+      ` b${getComputedStyle(document.documentElement).getPropertyValue("--safe-bottom").trim()}`,
+    `delete: ${del ? "found" : "MISSING FROM PAGE"}` +
+      (del ? `, hidden=${del.hidden}, display=${getComputedStyle(del).display}` : ""),
+    rect ? `delete box: ${Math.round(rect.x)},${Math.round(rect.y)} ${Math.round(rect.width)}x${Math.round(rect.height)}` : "",
+    panel ? `panel scroll ${panel.scrollHeight}/${panel.clientHeight}, x-overflow ${panel.scrollWidth > panel.clientWidth}` : "",
+    `supports color-mix: ${window.CSS && CSS.supports ? CSS.supports("color", "color-mix(in srgb, red 50%, transparent)") : "?"}`,
+    `page locked: ${document.documentElement.classList.contains("is-locked")}`,
+    navigator.userAgent,
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+function armDiagnostics() {
+  const subtitle = document.getElementById("subtitle");
+  if (!subtitle) return;
+  subtitle.addEventListener("click", () => {
+    diagnosticTaps += 1;
+    clearTimeout(diagnosticTimer);
+    diagnosticTimer = setTimeout(() => {
+      diagnosticTaps = 0;
+    }, 1500);
+    if (diagnosticTaps < 5) return;
+    diagnosticTaps = 0;
+    const report = describeEnvironment();
+    console.info("[planner] diagnostics\n" + report);
+    if (typeof tg.showAlert === "function") tg.showAlert(report);
+  });
+}
+
+async function loadVersion() {
+  // /health needs no auth, so this works even when initData is rejected.
+  try {
+    const response = await fetch(`${API_BASE.replace(/\/api$/, "")}/health`);
+    if (!response.ok) return;
+    const body = await response.json();
+    state.version = body.version || null;
+    console.info(`[planner] build ${state.version}`);
+  } catch (err) {
+    console.warn("[planner] could not read build version", err);
+  }
+}
+
 function applyTelegramTheme() {
   // Telegram exposes its palette as CSS variables; adopt them when present so
   // the app matches the client's theme.
@@ -2144,6 +2256,9 @@ function applyTelegramTheme() {
 buildRatingButtons();
 setupDevBanner();
 applyTelegramTheme();
+watchOverlays();
+armDiagnostics();
+loadVersion();
 tg.ready();
 tg.expand();
 // After expand(): expanding changes the viewport and therefore the insets, and
