@@ -503,14 +503,23 @@ function escapeHtml(value) {
   );
 }
 
+// What the Open button points at: the post itself when there is one, else a
+// link the caption carried.
+function openUrl(link) {
+  return link.url || link.info_url || null;
+}
+
 function displayTitle(link) {
   if (link.title) return link.title;
+  // A forward's canonical id is tg://channel/<chat>/<message>, which is an
+  // internal dedup key and would render as gibberish. Say what it is instead.
+  if ((link.canonical_url || "").startsWith("tg:")) return "Forwarded post";
   // Photo posts often have no metadata; show a readable fragment of the URL.
   try {
     const url = new URL(link.canonical_url || link.url);
     return `${url.hostname.replace(/^www\./, "")}${url.pathname}`;
   } catch (err) {
-    return link.url;
+    return link.url || "Untitled";
   }
 }
 
@@ -605,10 +614,11 @@ function cardHtml(link) {
       </div>
       <div class="card__actions">
         ${
-          // No post behind a manual entry, so no link to open. Rendering a
-          // dead "Open" would be worse than rendering nothing.
-          link.url
-            ? `<a class="btn btn--ghost btn--sm" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">Open</a>`
+          // The post's own URL when it has one, otherwise a link found in its
+          // caption - a forwarded post's "More info". A manual entry has
+          // neither, and rendering a dead "Open" would be worse than nothing.
+          openUrl(link)
+            ? `<a class="btn btn--ghost btn--sm" href="${escapeHtml(openUrl(link))}" target="_blank" rel="noopener noreferrer">Open</a>`
             : ""
         }
         <button class="btn btn--ghost btn--sm" data-action="edit">Edit</button>

@@ -182,6 +182,15 @@ and `platform` set to `telegram` so the card can still say where it came from.
   order cannot change the key.
 - A forwarded album is one entry and one Gemini call, buffered by
   `media_group_id` like any other.
+- **A URL in the caption is kept, but only to be tapped.** Channel posts sign
+  off with "More info: bit.ly/…", so the first URL found goes in `info_url` and
+  the card offers it as Open. It is deliberately *not* `url`: nothing extracts
+  from it, canonicalises it, or de-duplicates on it, and `url IS NOT NULL` is
+  precisely what tells the caption-parse, extraction-retry and metadata-backfill
+  jobs that a row has a post worth re-reading — which a shortener is not.
+  Telegram's caption entities are read first, because a "More info" hyperlink
+  can hide its URL behind display text where no amount of reading the caption
+  would find it; a conservative regex is the fallback.
 
 **Photo and carousel posts** (TikTok slideshows, Instagram `/p/` posts) cannot
 be extracted at all. Do NOT scrape slide image URLs — fragile, and it sends the
@@ -412,7 +421,7 @@ the difference. NULL is the honest value there; an empty string would be a URL
 that happens to be blank. The Mini App renders no "Open" button when there is
 no URL, and no source badge when there is no platform.
 
-`links(id, url, canonical_url, platform, caption, title, tags, added_by,
+`links(id, url, info_url, canonical_url, platform, caption, title, tags, added_by,
 added_at, parsed_at, done, done_at, done_by, rating, note, photo_file_id,
 event_start, event_end, is_evergreen, location, geocode_hint, is_collection,
 region, lat, lng, geocoded_at, geocode_status, category, subcategory)`

@@ -121,6 +121,9 @@ ALTER TABLE links ADD COLUMN IF NOT EXISTS is_collection BOOLEAN NOT NULL DEFAUL
 ALTER TABLE links ALTER COLUMN url      DROP NOT NULL;
 ALTER TABLE links ALTER COLUMN platform DROP NOT NULL;
 ALTER TABLE links ADD COLUMN IF NOT EXISTS geocode_status TEXT;
+-- A tappable link found inside a caption, distinct from the row's own URL.
+-- See schema.sql for why the two are separate columns.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS info_url       TEXT;
 
 -- The shared calendar reuses `availability`. It was drafted for structured
 -- free/busy, but what is actually wanted is "gym then free after 8" - prose,

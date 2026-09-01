@@ -146,9 +146,13 @@ class LinkOut(BaseModel):
     """A stored link as the Mini App sees it."""
 
     id: int
-    # NULL for a manual entry - a place tried without a post behind it. The
-    # Mini App keys its "Open" button off this rather than off a type flag.
+    # NULL for a manual entry - a place tried without a post behind it, and
+    # for a forwarded channel post, which is a copy rather than an address.
     url: str | None = None
+    # A link found inside the caption - a forwarded post's "More info"
+    # sign-off. Not this row's address: nothing extracts from it or
+    # de-duplicates on it. The Mini App offers it as Open when `url` is NULL.
+    info_url: str | None = None
     canonical_url: str | None = None
     platform: str | None = None
     title: str | None = None

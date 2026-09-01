@@ -70,15 +70,15 @@ _PLATFORM_BY_DOMAIN = {
 PLATFORM_LABELS = {
     "tiktok": "TikTok",
     "instagram": "Instagram",
-    # A post forwarded in from a channel. Not a link platform - there is no URL
-    # to open and nothing to extract - but a real source worth naming on the
-    # card, which a NULL platform (a manual entry) deliberately does not have.
+    # A post forwarded in from a channel. Not a link platform - nothing is
+    # extracted from it - but a real source worth naming on the card, which a
+    # NULL platform (a manual entry) deliberately does not have.
     "telegram": "Telegram",
 }
 
 # Source value for a forwarded channel post. Stored in `platform` so the Mini
 # App can badge where it came from; `url` stays NULL, because a forward is a
-# copy of a post, not an address anyone can open.
+# copy of a post, not an address that resolves to one.
 FORWARD_PLATFORM = "telegram"
 
 # Telegram delivers an album as separate messages sharing a media_group_id,
@@ -140,13 +140,72 @@ def extract_links(text: str) -> list[tuple[str, str]]:
 # pasted link and a hand-typed entry. It has a caption and usually a photo, and
 # both are exactly what the parser already reads - so it goes through the same
 # single Gemini call, returns the same JSON, and is held to the same closed
-# taxonomy. What it does not have is a URL: there is nothing for yt-dlp to
-# extract and nothing for the Mini App to open. So it is stored the way a
-# manual entry is, with `url` NULL, rather than pretending to be a link.
+# taxonomy. What it does not have is a URL of its own: there is nothing for
+# yt-dlp to extract. So it is stored the way a manual entry is, with `url`
+# NULL, rather than pretending to be a link.
+#
+# A URL *inside* the caption is a different thing and is kept in `info_url` -
+# a "More info: bit.ly/..." sign-off is worth a tap, but it is not this post's
+# address, is never extracted from, and is never de-duplicated on.
 #
 # Only channel forwards are taken. A forward from a person or a group is far
 # more likely to be conversation than something worth saving, and auto-saving
 # every forwarded photo would fill the list with things nobody chose to keep.
+
+
+# Any URL, not just the two platforms - a forwarded post routinely signs off
+# with "More info: bit.ly/...", and that is worth keeping as something to tap.
+# Deliberately conservative, because this runs over prose: a scheme is accepted
+# outright, and a bare host only when it is followed by a path, so "great
+# food.Try it" is not read as a link while "bit.ly/4xvu4XH" is.
+_CAPTION_URL = re.compile(
+    r"(?<![\w.@-])"
+    r"(?:https?://\S+"
+    r"|(?:[a-z0-9-]+\.)+[a-z]{2,24}/\S*)",
+    re.IGNORECASE,
+)
+
+# Entity types that carry a URL. `url` is a link Telegram found in the text;
+# `text_link` is one hidden behind display text, which is exactly how a
+# channel writes "More info" as a tappable word.
+_URL_ENTITY_TYPES = {"url", "text_link"}
+
+
+def first_caption_url(message, caption: str) -> str | None:
+    """The first tappable URL in a caption, or None.
+
+    Telegram's own entities come first and are authoritative: they cover a
+    `text_link`, where the URL never appears in the text at all and no amount
+    of reading the string would find it. The regex is the fallback for a client
+    or a forward that supplied no entities.
+
+    Nothing is extracted from what this returns - it is not canonicalised, not
+    de-duplicated on, and never fetched. It is stored so the card can offer an
+    Open button, and that is all.
+    """
+    entities = getattr(message, "caption_entities", None) or ()
+    best = None
+    for entity in entities:
+        if getattr(entity, "type", None) not in _URL_ENTITY_TYPES:
+            continue
+        if entity.type == "text_link":
+            found = getattr(entity, "url", None)
+        else:
+            try:
+                found = message.parse_caption_entity(entity)
+            except Exception:  # noqa: BLE001 - malformed offsets must not fail intake
+                logger.debug("could not read caption entity", exc_info=True)
+                continue
+        if not found:
+            continue
+        offset = getattr(entity, "offset", 0)
+        if best is None or offset < best[0]:
+            best = (offset, found)
+    if best is not None:
+        return normalise_url(best[1])
+
+    match = _CAPTION_URL.search(caption or "")
+    return normalise_url(match.group(0)) if match else None
 
 
 def channel_forward_origin(message):
@@ -600,6 +659,7 @@ async def _run_forward_intake(
     added_by = user.id if user else 0
     canonical = forward_identity(origin)
     source = forward_source_name(origin)
+    info_url = first_caption_url(message, caption)
 
     logger.info(
         "forward intake: chat=%s message_id=%s from=%s channel=%r identity=%s "
@@ -612,6 +672,8 @@ async def _run_forward_intake(
         len(photos),
         len(caption),
     )
+    if info_url:
+        logger.info("caption carries a link to keep: %s", info_url)
 
     try:
         existing = find_link_by_canonical_url(db_path, canonical)
@@ -643,6 +705,9 @@ async def _run_forward_intake(
             added_by=added_by,
             canonical_url=canonical,
             caption=caption or None,
+            # Kept to be tapped, not to be read: no extraction, no
+            # canonicalisation, no dedup on this value.
+            info_url=info_url,
         )
         if photos:
             add_link_photos(
@@ -669,7 +734,9 @@ async def _run_forward_intake(
 
         await _reply(
             message,
-            _summarise_forward(link_id, source, parsed, len(images), bool(caption)),
+            _summarise_forward(
+                link_id, source, parsed, len(images), bool(caption), info_url
+            ),
         )
     except Exception:
         logger.exception("failed to store forward %s", canonical)
@@ -680,7 +747,12 @@ async def _run_forward_intake(
 
 
 def _summarise_forward(
-    link_id: int, source: str, parsed, image_count: int, had_caption: bool
+    link_id: int,
+    source: str,
+    parsed,
+    image_count: int,
+    had_caption: bool,
+    info_url: str | None = None,
 ) -> str:
     """Confirmation for a saved forward, in the same shape link intake uses."""
     headline = (parsed.title if parsed and parsed.title else None) or "(no title found)"
@@ -707,6 +779,8 @@ def _summarise_forward(
         lines.append(f"     read from {read_from}")
     if parsed:
         lines.extend(_summarise_parsed(parsed))
+    if info_url:
+        lines.append(f"     link: {info_url}")
     # Report the outcome, not the stage: only say nothing was read when the
     # parse genuinely learned nothing from either source.
     if not _parse_yielded_content(parsed):

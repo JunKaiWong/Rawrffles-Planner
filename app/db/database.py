@@ -45,6 +45,9 @@ _EXPECTED_LINK_COLUMNS = {
     # Lookup-only address, never displayed. See schema.sql for why this is not
     # just `location`.
     "geocode_hint": "TEXT",
+    # A URL found inside a caption - a forwarded post's "More info" link -
+    # rather than the address of the post itself. See schema.sql.
+    "info_url": "TEXT",
     # A roundup with no single location. NOT NULL needs a default here, which
     # SQLite allows on ADD COLUMN, so existing rows become 0 rather than NULL.
     "is_collection": "INTEGER NOT NULL DEFAULT 0",
@@ -302,6 +305,7 @@ def insert_link(
     title: str | None = None,
     caption: str | None = None,
     location: str | None = None,
+    info_url: str | None = None,
     added_at: str | None = None,
 ) -> int:
     """Insert a link and return its new id.
@@ -319,8 +323,8 @@ def insert_link(
     with connect(db_path) as conn:
         cursor = conn.execute(
             "INSERT INTO links (url, canonical_url, platform, title, caption, "
-            "location, added_by, added_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "location, info_url, added_by, added_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
             (
                 url,
                 canonical_url,
@@ -328,6 +332,7 @@ def insert_link(
                 title,
                 caption,
                 location,
+                info_url,
                 added_by,
                 added_at,
             ),
@@ -857,7 +862,7 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
     client-side, so both are returned in one call."""
     with connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT id, url, canonical_url, platform, title, caption, location, "
+            "SELECT id, url, info_url, canonical_url, platform, title, caption, location, "
             "geocode_hint, is_collection, region, category, subcategory, lat, lng, tags, "
             "added_by, added_at, done, done_at, done_by, "
             "rating, note, event_start, event_end, is_evergreen, "
@@ -871,7 +876,7 @@ def list_links(db_path: str | Path) -> list[sqlite3.Row]:
 def get_link(db_path: str | Path, link_id: int) -> sqlite3.Row | None:
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id, url, canonical_url, platform, title, caption, location, "
+            "SELECT id, url, info_url, canonical_url, platform, title, caption, location, "
             "geocode_hint, is_collection, region, category, subcategory, lat, lng, tags, "
             "added_by, added_at, done, done_at, done_by, "
             "rating, note, event_start, event_end, is_evergreen, "

@@ -13,7 +13,15 @@ CREATE TABLE IF NOT EXISTS links (
     -- retries, metadata backfill - filters on url IS NOT NULL.
     url            TEXT,
     canonical_url  TEXT,                      -- normalised dedup key, NULL if unresolved
-    platform       TEXT,                      -- 'tiktok' | 'instagram', NULL when manual
+    platform       TEXT,                      -- 'tiktok'|'instagram'|'telegram', NULL when manual
+    -- A URL found inside the content rather than the address of the content.
+    -- Forwarded channel posts routinely end with "More info: bit.ly/..." and
+    -- that link is worth keeping as something to tap, but it is NOT this row's
+    -- post: nothing extracts from it, canonicalises it, or de-duplicates on
+    -- it. Kept separate from `url` for exactly that reason - `url IS NOT NULL`
+    -- is what tells the caption-parse, extraction-retry and metadata-backfill
+    -- jobs that a row has a post they can re-read, and a shortener is not one.
+    info_url       TEXT,
     title          TEXT,                      -- from yt-dlp
     caption        TEXT,                      -- post description, from yt-dlp
     location       TEXT,                      -- rarely set by yt-dlp; LLM fills later
