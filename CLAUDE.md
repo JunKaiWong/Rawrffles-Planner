@@ -147,7 +147,10 @@ Things that cost real debugging time. Read before touching related code.
   downloadable datasets with no "near this point" query. STB's Tourism
   Information Hub did not resolve in DNS at all. Do not re-attempt these
   without new evidence; gap-filling should use OneMap thematic layers, which
-  cover venues rather than events.
+  cover venues rather than events. There is deliberately **no**
+  `app/services/events.py`: this note is the whole of what that module would
+  have contained, and a file holding only a comment is a decoy — the next
+  person opens it expecting a service and finds a redirect to here.
 
 ## Extraction
 
