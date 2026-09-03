@@ -715,11 +715,18 @@ function ordinal(n) {
   return `${n}${{ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th"}`;
 }
 
+// Always an exact day count. "next week" used to cover 7-13 days, which read
+// as vaguer than the data actually is - a monthsary 12 days out is not "next
+// week" in any useful sense, and the whole point of the banner is knowing how
+// long there is. today/tomorrow stay because "in 0 days" and "in 1 days" are
+// worse, not because the bucket was a good idea.
+//
+// Matches ReminderEntry.describe_when() in app/services/reminders.py, so the
+// banner and the bot's own reminder messages say the same thing about the
+// same date.
 function describeWhen(days) {
   if (days === 0) return "today";
   if (days === 1) return "tomorrow";
-  if (days < 7) return `in ${days} days`;
-  if (days < 14) return "next week";
   return `in ${days} days`;
 }
 
