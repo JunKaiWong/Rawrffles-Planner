@@ -343,6 +343,19 @@ html.is-locked body {
   padding: 0 16px 12px;
 }
 
+.map-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.map-actions__hint {
+  color: var(--tg-hint);
+  font-size: 12px;
+}
+
 .map {
   /* Contains Leaflet's internal stacking entirely. `position: relative` is
      already set by Leaflet, but with `z-index: auto` it forms no stacking

@@ -78,6 +78,18 @@
     container measures itself as 0x0 and renders as a grey box.
   -->
   <section id="map-panel" class="map-panel" hidden>
+    <div class="map-actions">
+      <!--
+        Linked, not embedded. The official diagram is copyrighted and changes
+        when the network does - a hosted copy would be both a licensing problem
+        and quietly wrong the day a line opens. LTA's page also carries live
+        service status, which a static image never could.
+      -->
+      <button type="button" id="mrt-map-btn" class="btn btn--ghost btn--sm">
+        MRT system map
+      </button>
+      <span class="map-actions__hint">opens LTA's live map</span>
+    </div>
     <div id="map" class="map"></div>
     <p id="map-empty" class="map__empty" hidden>
       No saved places have coordinates yet. Add a location to an entry and it

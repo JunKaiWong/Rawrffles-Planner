@@ -55,6 +55,11 @@ function createStub(initData) {
     showAlert(message) {
       window.alert(message);
     },
+    // Telegram opens external links in its own in-app browser; outside it,
+    // a new tab is the closest equivalent.
+    openLink(url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    },
     showConfirm(message, callback) {
       callback(window.confirm(message));
     },
@@ -219,6 +224,7 @@ const els = {
   mapPanel: document.getElementById("map-panel"),
   map: document.getElementById("map"),
   mapEmpty: document.getElementById("map-empty"),
+  mrtMapBtn: document.getElementById("mrt-map-btn"),
   calGrid: document.getElementById("cal-grid"),
   calMonthLabel: document.getElementById("cal-month"),
   calPrev: document.getElementById("cal-prev"),
@@ -1800,6 +1806,8 @@ els.addManual.addEventListener("click", () => openSheet(null, "create"));
 
 els.entryCollection.addEventListener("change", syncCollectionFields);
 
+els.mrtMapBtn.addEventListener("click", openMrtMap);
+
 // Telegram's own confirm dialog, so it matches the client's theme and sits
 // where the user expects. showConfirm is Bot API 6.2; an older client falls
 // back to the browser's, which is uglier but equally blocking - the one thing
@@ -2203,6 +2211,13 @@ const MAP_TILES = {
   light: "https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png",
   dark: "https://www.onemap.gov.sg/maps/tiles/Night/{z}/{x}/{y}.png",
 };
+// LTA's own MRT/LRT page: the authoritative diagram, and it carries live
+// service status, so a delay or a closure shows there and never here. Opened
+// rather than embedded - the image is copyrighted, and a hosted copy would go
+// stale the day a line opens. Verified responsive: no horizontal scroll at
+// 374px, which is what Telegram's in-app browser will give it on a phone.
+const MRT_MAP_URL = "https://www.lta.gov.sg/content/ltagov/en/map/train.html";
+
 const MAP_MIN_ZOOM = 11;
 const MAP_MAX_ZOOM = 19;
 // OneMap's actual tile coverage, probed rather than guessed: tiles exist from
@@ -2339,6 +2354,16 @@ function setSwipeToClose(enabled) {
     swipeLockSupported = false;
     return false;
   }
+}
+
+function openMrtMap() {
+  // openLink is Telegram's in-app browser, which keeps the user inside the
+  // client; the stub falls back to a new tab so the button works in dev too.
+  if (typeof tg.openLink === "function") {
+    tg.openLink(MRT_MAP_URL);
+    return;
+  }
+  window.open(MRT_MAP_URL, "_blank", "noopener,noreferrer");
 }
 
 function showMap() {

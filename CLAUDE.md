@@ -337,6 +337,15 @@ by real calls before building, because the alternative was assuming:
   client the map still works but is easier to close by accident, and the
   diagnostics readout reports which.
 
+**The MRT system map is linked, never embedded.** A button on the Map tab
+opens LTA's own MRT/LRT page in Telegram's in-app browser via `tg.openLink()`,
+falling back to a new tab where that method is absent. Linking rather than
+hosting is deliberate on two counts: the official diagram is copyrighted, and a
+stored copy would be silently wrong the day a line opens. LTA's page also
+carries live service status, which a static image cannot. Verified responsive —
+no horizontal scroll at 374px, which is roughly what the in-app browser gives
+it on a phone.
+
 **MRT lines were investigated and rejected.** The free official data cannot
 draw them: data.gov.sg's MP19 Rail Line layer is 22MB of LineStrings whose only
 properties are `OBJECTID`, `GRND_LEVEL`, `RAIL_TYPE`, `INC_CRC`, `FMEL_UPD_D`
