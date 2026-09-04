@@ -314,6 +314,100 @@ html.is-locked body {
   font-weight: 550;
 }
 
+/* --- Map ------------------------------------------------------------------
+ *
+ * Height is set from JS, not here: it fills from the map's own top edge to the
+ * bottom of the viewport, and only JS knows where that top edge lands once the
+ * banner, header and tab row have wrapped. The value here is the fallback for
+ * the moment before that runs.
+ */
+
+.map-panel {
+  padding: 0 16px 12px;
+}
+
+.map {
+  height: 62vh;
+  min-height: 280px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  /* Leaflet positions tiles absolutely inside this; without clipping they
+     escape the rounded corners. */
+  overflow: hidden;
+  background: var(--tg-secondary-bg);
+}
+
+.map__empty {
+  margin: 12px 2px 0;
+  color: var(--tg-hint);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* A CSS pin rather than Leaflet's default PNG marker. Self-hosting that PNG
+   means relying on Leaflet's icon-path detection, which is a well-known source
+   of 404s; a divIcon has no image to find, scales without a 2x asset, and can
+   follow the Telegram theme. */
+.pin {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--tg-bg);
+  border-radius: 50%;
+  background: var(--tg-button);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* Visited places read as secondary - the map is mostly for deciding where to
+   go next, and a done place is context rather than an option. */
+.pin--done {
+  background: var(--tg-hint);
+}
+
+/* Leaflet's own chrome, themed. Left to its defaults it is white-on-white in
+   dark mode and unreadable. */
+.leaflet-container {
+  background: var(--tg-secondary-bg);
+  font: inherit;
+  font-size: 12px;
+}
+
+/* Scoped under .leaflet-container to match the specificity of Leaflet's own
+   `.leaflet-container .leaflet-control-attribution`, which is (0,2,0). A bare
+   `.leaflet-control-attribution` is (0,1,0) and loses however late it is
+   loaded - which left the attribution white-on-white in dark mode. */
+.leaflet-container .leaflet-control-attribution {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  background: var(--tg-bg);
+  color: var(--tg-hint);
+  font-size: 10px;
+}
+
+.leaflet-container .leaflet-control-attribution a {
+  color: var(--tg-hint);
+}
+
+/* The OneMap logo is required attribution, not decoration, so it is sized to
+   stay legible rather than tucked away. */
+.leaflet-control-attribution img {
+  display: block;
+  height: 14px;
+  width: auto;
+}
+
+.leaflet-bar a {
+  background: var(--tg-bg);
+  color: var(--tg-text);
+  border-bottom-color: var(--border);
+}
+
+.leaflet-bar a:hover {
+  background: var(--tg-secondary-bg);
+  color: var(--tg-text);
+}
+
 /* --- Header + tabs --- */
 
 .header {

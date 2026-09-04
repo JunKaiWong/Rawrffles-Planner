@@ -1,0 +1,6 @@
+# Vendored third-party assets are stored byte-for-byte as published. Line-ending
+# conversion would change their bytes between platforms, which matters here
+# because the Mini App's cache-busting fingerprint is a hash of the file: the
+# same release would get a different ?v= on Windows and on Linux, and the phone
+# would be told to re-fetch a library that had not changed.
+miniapp/vendor/** -text

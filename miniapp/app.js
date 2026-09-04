@@ -216,6 +216,9 @@ const els = {
   viewerImg: document.getElementById("photo-viewer-img"),
   dateBanner: document.getElementById("date-banner"),
   calendar: document.getElementById("calendar"),
+  mapPanel: document.getElementById("map-panel"),
+  map: document.getElementById("map"),
+  mapEmpty: document.getElementById("map-empty"),
   calGrid: document.getElementById("cal-grid"),
   calMonthLabel: document.getElementById("cal-month"),
   calPrev: document.getElementById("cal-prev"),
@@ -777,9 +780,11 @@ function render() {
   // buttons are all about links and mean nothing here.
   const onCalendar = state.tab === "calendar";
   const onSettings = state.tab === "settings";
-  const onLinks = !onCalendar && !onSettings;
+  const onMap = state.tab === "map";
+  const onLinks = !onCalendar && !onSettings && !onMap;
   els.calendar.hidden = !onCalendar;
   els.settingsPanel.hidden = !onSettings;
+  els.mapPanel.hidden = !onMap;
   els.list.hidden = !onLinks;
   document.querySelector(".filters").hidden = !onLinks;
   document.querySelector(".actions").hidden = !onLinks;
@@ -790,6 +795,13 @@ function render() {
   }
   if (onSettings) {
     setStatus("");
+    return;
+  }
+  if (onMap) {
+    setStatus("");
+    // After the panel is shown, never before: Leaflet cannot measure a hidden
+    // container, and a map built in one renders as a grey box.
+    showMap();
     return;
   }
 
@@ -1106,6 +1118,9 @@ els.tabs.forEach((tab) => {
     // visit to another tab.
     if (state.tab === "calendar" && !state.calMonth) loadCalendar();
     if (state.tab === "settings" && !state.settings) loadSettingsPanel();
+    // Re-enable swipe-to-close on the way out, so the gesture only stays
+    // disabled while a map is actually on screen.
+    if (state.tab !== "map") hideMap();
     els.tabs.forEach((other) => {
       const active = other === tab;
       other.classList.toggle("is-active", active);
@@ -2154,7 +2169,12 @@ function watchSafeArea() {
   ["safeAreaChanged", "contentSafeAreaChanged", "viewportChanged", "fullscreenChanged"].forEach(
     (event) => {
       try {
-        tg.onEvent(event, applySafeArea);
+        tg.onEvent(event, () => {
+          applySafeArea();
+          // The map's height is measured, so it has to be re-measured whenever
+          // the viewport or the insets move under it.
+          if (state.tab === "map") sizeMap();
+        });
       } catch (err) {
         // An older client rejects an event name it does not know. The others
         // still register, and the initial read has already happened.
@@ -2162,6 +2182,177 @@ function watchSafeArea() {
       }
     }
   );
+}
+
+// --- Map ------------------------------------------------------------------
+//
+// Saved places on OneMap's tiles. Everything here is deliberate:
+//
+// * The Leaflet instance is created on first open, not at load. A map built
+//   inside a hidden container measures itself as 0x0 and renders as a grey
+//   box; invalidateSize() on every show covers the case where the viewport
+//   changed while the tab was elsewhere.
+// * Tiles come from OneMap, which is free and needs no token, but REQUIRES the
+//   logo and attribution to be shown - see their Terms of Use. That is why the
+//   attribution control is not suppressed.
+// * Zoom is clamped to 11-19. Outside that range OneMap answers 200 with a
+//   zero-byte body, which paints nothing and reads as a broken map rather than
+//   as "there is no tile here".
+
+const MAP_TILES = {
+  light: "https://www.onemap.gov.sg/maps/tiles/Default/{z}/{x}/{y}.png",
+  dark: "https://www.onemap.gov.sg/maps/tiles/Night/{z}/{x}/{y}.png",
+};
+const MAP_MIN_ZOOM = 11;
+const MAP_MAX_ZOOM = 19;
+// OneMap's actual tile coverage, probed rather than guessed: tiles exist from
+// about 1.10N to 1.47N and 103.6E to 104.2E, and outside that the server
+// answers 200 with a zero-byte body - a success that paints nothing. Bounding
+// the map keeps a pan from drifting into that emptiness, which would read as a
+// broken map rather than as the edge of the data.
+const MAP_BOUNDS = [[1.16, 103.60], [1.47, 104.12]];
+const MAP_DEFAULT_VIEW = [[1.3521, 103.8198], 12];
+// Required by OneMap's terms; the logo is served from their own origin.
+const MAP_ATTRIBUTION =
+  '<img src="https://www.onemap.gov.sg/web-assets/images/logo/om_logo_256.png" ' +
+  'alt="OneMap" width="24" height="14" />' +
+  '<span>New <a href="https://www.onemap.gov.sg/" target="_blank" ' +
+  'rel="noopener noreferrer">OneMap</a> &copy; contributors | ' +
+  '<a href="https://www.sla.gov.sg/" target="_blank" rel="noopener noreferrer">' +
+  'Singapore Land Authority</a></span>';
+
+let mapInstance = null;
+let mapTileLayer = null;
+let mapMarkers = [];
+// null until first tried. false means this Telegram is older than Bot API 7.7
+// and the map will be easier to close by accident - worth being able to see.
+let swipeLockSupported = null;
+
+function mappableLinks() {
+  return state.links.filter(
+    (l) => typeof l.lat === "number" && typeof l.lng === "number"
+  );
+}
+
+function tileUrlForTheme() {
+  const dark = (document.documentElement.dataset.theme || tg.colorScheme) === "dark";
+  return dark ? MAP_TILES.dark : MAP_TILES.light;
+}
+
+// The map fills from its own top edge to the bottom of the viewport. Measured
+// rather than computed in CSS, because where that top edge lands depends on
+// whether the date banner is present and whether the tab row has wrapped.
+function sizeMap() {
+  if (!mapInstance) return;
+  const el = els.map;
+  const top = el.getBoundingClientRect().top;
+  const bottomInset = parseInt(
+    getComputedStyle(document.documentElement).getPropertyValue("--safe-bottom"),
+    10
+  ) || 0;
+  const height = Math.max(240, window.innerHeight - top - bottomInset - 16);
+  el.style.height = `${height}px`;
+  mapInstance.invalidateSize();
+}
+
+function ensureMap() {
+  if (mapInstance) return mapInstance;
+  if (typeof L === "undefined") {
+    // Vendored locally, so this means the file did not load at all rather than
+    // a CDN being unreachable. Say so instead of failing silently.
+    setStatus("Map library did not load. Try reopening the app.", "error");
+    return null;
+  }
+  mapInstance = L.map(els.map, {
+    minZoom: MAP_MIN_ZOOM,
+    maxZoom: MAP_MAX_ZOOM,
+    maxBounds: MAP_BOUNDS,
+    // Keeps a drag from rubber-banding far outside Singapore before snapping.
+    maxBoundsViscosity: 0.8,
+    zoomControl: true,
+    attributionControl: true,
+  });
+  mapInstance.setView(MAP_DEFAULT_VIEW[0], MAP_DEFAULT_VIEW[1]);
+  mapTileLayer = L.tileLayer(tileUrlForTheme(), {
+    minZoom: MAP_MIN_ZOOM,
+    maxZoom: MAP_MAX_ZOOM,
+    attribution: MAP_ATTRIBUTION,
+  }).addTo(mapInstance);
+  return mapInstance;
+}
+
+function renderMapMarkers() {
+  if (!mapInstance) return;
+  mapMarkers.forEach((m) => m.remove());
+  mapMarkers = [];
+
+  const links = mappableLinks();
+  els.mapEmpty.hidden = links.length > 0;
+
+  links.forEach((link) => {
+    const marker = L.marker([link.lat, link.lng], {
+      icon: L.divIcon({
+        className: "",
+        html: `<div class="pin${link.done ? " pin--done" : ""}"></div>`,
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      }),
+      // Read by a screen reader, and shown as a tooltip on a desktop.
+      title: displayTitle(link),
+      keyboard: false,
+    });
+    // Straight to the sheet the rest of the app already uses: a second,
+    // map-only detail popup would be a second place to keep in step.
+    marker.on("click", () => openSheet(link, "edit"));
+    marker.addTo(mapInstance);
+    mapMarkers.push(marker);
+  });
+
+  // Frame what there is, rather than always showing the whole island.
+  if (links.length) {
+    const bounds = L.latLngBounds(links.map((l) => [l.lat, l.lng]));
+    mapInstance.fitBounds(bounds.pad(0.25), { maxZoom: 16, animate: false });
+  }
+}
+
+function applyMapTheme() {
+  if (!mapTileLayer) return;
+  const url = tileUrlForTheme();
+  if (mapTileLayer._url !== url) mapTileLayer.setUrl(url);
+}
+
+// Telegram closes a Mini App on a downward swipe, which is exactly the gesture
+// used to pan a map. Bot API 7.7 added these; on an older client the calls are
+// absent and the map is still usable, just easier to close by accident.
+function setSwipeToClose(enabled) {
+  const method = enabled ? "enableVerticalSwipes" : "disableVerticalSwipes";
+  if (typeof tg[method] !== "function") {
+    swipeLockSupported = false;
+    return false;
+  }
+  try {
+    tg[method]();
+    swipeLockSupported = true;
+    return true;
+  } catch (err) {
+    console.warn(`[planner] ${method} failed`, err);
+    swipeLockSupported = false;
+    return false;
+  }
+}
+
+function showMap() {
+  const map = ensureMap();
+  if (!map) return;
+  setSwipeToClose(false);
+  // After the panel is visible: sizing a hidden element measures zero.
+  sizeMap();
+  applyMapTheme();
+  renderMapMarkers();
+}
+
+function hideMap() {
+  if (mapInstance) setSwipeToClose(true);
 }
 
 // --- Scroll lock ----------------------------------------------------------
@@ -2238,9 +2429,30 @@ function describeEnvironment() {
     panel ? `panel scroll ${panel.scrollHeight}/${panel.clientHeight}, x-overflow ${panel.scrollWidth > panel.clientWidth}` : "",
     `supports color-mix: ${window.CSS && CSS.supports ? CSS.supports("color", "color-mix(in srgb, red 50%, transparent)") : "?"}`,
     `page locked: ${document.documentElement.classList.contains("is-locked")}`,
+    // The map cannot be inspected on a phone any other way: no devtools, and a
+    // blank tile looks identical to a bug. This says whether Leaflet loaded,
+    // where the view is, whether the zoom clamp holds, and whether the client
+    // accepted the swipe-lock the map needs to be pannable at all.
+    mapDiagnostics(),
     navigator.userAgent,
   ];
   return lines.filter(Boolean).join("\n");
+}
+
+function mapDiagnostics() {
+  if (typeof L === "undefined") return "map: Leaflet did NOT load";
+  if (!mapInstance) return "map: not opened yet";
+  const c = mapInstance.getCenter();
+  const tiles = document.querySelectorAll(".leaflet-tile").length;
+  const blank = [...document.querySelectorAll(".leaflet-tile")].filter(
+    (img) => img.complete && img.naturalWidth === 0
+  ).length;
+  return (
+    `map: z${mapInstance.getZoom()} clamp ${mapInstance.getMinZoom()}-${mapInstance.getMaxZoom()}` +
+    ` @${c.lat.toFixed(3)},${c.lng.toFixed(3)}` +
+    ` tiles ${tiles} (${blank} blank), pins ${mapMarkers.length}` +
+    `, swipe-lock ${swipeLockSupported === null ? "untried" : swipeLockSupported}`
+  );
 }
 
 function armDiagnostics() {
@@ -2273,6 +2485,20 @@ async function loadVersion() {
   }
 }
 
+function watchTheme() {
+  if (typeof tg.onEvent !== "function") return;
+  try {
+    tg.onEvent("themeChanged", () => {
+      applyTelegramTheme();
+      // Tiles are half the map's appearance; leaving Default tiles under a
+      // dark UI is worse than not following the theme at all.
+      applyMapTheme();
+    });
+  } catch (err) {
+    console.warn("[planner] no themeChanged event on this client", err);
+  }
+}
+
 function applyTelegramTheme() {
   // Telegram exposes its palette as CSS variables; adopt them when present so
   // the app matches the client's theme.
@@ -2295,6 +2521,7 @@ function applyTelegramTheme() {
 buildRatingButtons();
 setupDevBanner();
 applyTelegramTheme();
+watchTheme();
 initPlanDate();
 watchOverlays();
 armDiagnostics();

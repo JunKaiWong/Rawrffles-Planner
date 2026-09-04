@@ -213,12 +213,18 @@ class RevalidatedStatic(StaticFiles):
 # revalidation cannot be talked round by another header.
 #
 # So the URL itself changes instead. index.html is served with a short content
-# hash appended to its two asset references, and that hash changes exactly when
-# the file's bytes do: a new deploy asks for a URL no cache has ever seen, and
-# an unchanged deploy asks for the one it already holds. This is the only
+# hash appended to every local asset reference, and that hash changes exactly
+# when the file's bytes do: a new deploy asks for a URL no cache has ever seen,
+# and an unchanged deploy asks for the one it already holds. This is the only
 # approach that does not depend on the client cooperating.
-
-_ASSET_REF = re.compile(rb'(src|href)="(app\.js|style\.css)"')
+#
+# Any relative .js or .css reference is covered, so a vendored library picks
+# this up by being referenced rather than by being added to a list here - the
+# list is what would be forgotten. Absolute URLs are skipped: the pattern
+# requires a first character that cannot begin a scheme, so Telegram's own
+# https://telegram.org/js/telegram-web-app.js is left alone, which is right
+# because its bytes are not ours to hash.
+_ASSET_REF = re.compile(rb'(src|href)="([A-Za-z0-9_][^":?]*\.(?:js|css))"')
 _index_cache: dict[str, object] = {}
 
 
@@ -236,32 +242,42 @@ def _asset_fingerprint(name: str) -> str:
 
 
 def _versioned_index() -> bytes:
-    """index.html with ?v=<hash> on app.js and style.css.
+    """index.html with ?v=<hash> on every local asset it references.
 
-    Recomputed only when one of the three files changes on disk, so the normal
-    request reads nothing: this is on the path of every Mini App open.
+    The referenced files are discovered from the HTML rather than listed here,
+    so vendoring a library needs no change to this function. The cache key is
+    the mtime of index.html plus every asset it names, so the normal request
+    stats a handful of files and reads none: this is on the path of every Mini
+    App open.
     """
-    paths = [MINIAPP_DIR / n for n in ("index.html", "app.js", "style.css")]
+    source = MINIAPP_DIR / "index.html"
     try:
-        stamp = tuple(p.stat().st_mtime_ns for p in paths)
+        raw = source.read_bytes()
+    except OSError:
+        logger.exception("could not read the Mini App index")
+        raise
+
+    names = [m.group(2).decode() for m in _ASSET_REF.finditer(raw)]
+    try:
+        stamp = tuple(
+            (MINIAPP_DIR / n).stat().st_mtime_ns for n in ["index.html", *names]
+        )
     except OSError:
         stamp = None
     if stamp is not None and _index_cache.get("stamp") == stamp:
         return _index_cache["body"]  # type: ignore[return-value]
 
-    versions = {b"app.js": _asset_fingerprint("app.js").encode(),
-                b"style.css": _asset_fingerprint("style.css").encode()}
+    versions = {n: _asset_fingerprint(n) for n in names}
 
     def stamp_ref(match: "re.Match[bytes]") -> bytes:
         attr, name = match.group(1), match.group(2)
-        return b'%s="%s?v=%s"' % (attr, name, versions[name])
+        return b'%s="%s?v=%s"' % (attr, name, versions[name.decode()].encode())
 
-    body = _ASSET_REF.sub(stamp_ref, (MINIAPP_DIR / "index.html").read_bytes())
+    body = _ASSET_REF.sub(stamp_ref, raw)
     _index_cache.update(stamp=stamp, body=body)
     logger.info(
-        "Mini App index built: app.js?v=%s style.css?v=%s",
-        versions[b"app.js"].decode(),
-        versions[b"style.css"].decode(),
+        "Mini App index built: %s",
+        ", ".join(f"{n}?v={v}" for n, v in versions.items()),
     )
     return body
 

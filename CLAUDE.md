@@ -43,6 +43,7 @@ users allowlisted, Mini App opening from the Telegram group.
 | Visit photos: Mini App upload and `+visit` in chat | Done |
 | Webhook `update_id` dedup + bounded retry | Done |
 | `/health` answering GET and HEAD, for the uptime keep-alive | Done |
+| Map tab — saved places on OneMap tiles | Done |
 | OneMap public-transport routing times | **Not built** |
 | Automatic Friday plan run | Built, deliberately not scheduled |
 | Same-venue grouping across posts | Deferred deliberately |
@@ -288,6 +289,47 @@ items. Never ask the LLM to prioritise — inconsistent and hard to debug.
 
 Expired links, and ones that have not opened yet, are filtered from planning
 input rather than deleted; expired ones are dimmed in the Mini App.
+
+## The map
+
+Saved places on OneMap's raster tiles, in a Map tab beside Calendar. Verified
+by real calls before building, because the alternative was assuming:
+
+- **Tiles are free and need no token**, unlike the thematic layers. Default in
+  light, Night in dark, following `themeChanged`.
+- **Zoom is clamped to 11-19, and the map is bounded to roughly 1.16-1.47N,
+  103.60-104.12E.** Outside either, OneMap answers `200` with a **zero-byte
+  body** — a success that paints nothing, which reads as a broken map rather
+  than as the edge of the data. The bounds were probed, not guessed.
+- **Attribution and the OneMap logo are mandatory** under their Terms of Use,
+  so the attribution control is never suppressed.
+- **Leaflet 1.9.4 is vendored** in `miniapp/vendor/leaflet/`, not loaded from a
+  CDN, so it picks up the asset fingerprinting and adds no runtime dependency
+  on a third party. Markers are CSS `divIcon` pins rather than Leaflet's PNG,
+  which avoids its icon-path detection entirely.
+- **Leaflet's CSS out-specifies a bare class.** Its own rule is
+  `.leaflet-container .leaflet-control-attribution` (0,2,0), so overriding it
+  needs the same scoping — load order cannot save a (0,1,0) selector, and the
+  attribution sat white-on-white in dark mode until this was matched.
+- **The map is created on first open, never at load.** Leaflet measures a
+  hidden container as 0x0 and renders a grey box. Height is measured from the
+  map's own top edge to the viewport bottom, so it survives the banner
+  appearing and the tab row wrapping.
+- **Telegram's swipe-to-close is the same gesture as panning**, so
+  `disableVerticalSwipes()` runs while the map is open and
+  `enableVerticalSwipes()` on the way out. Both are Bot API 7.7; on an older
+  client the map still works but is easier to close by accident, and the
+  diagnostics readout reports which.
+
+**MRT lines were investigated and rejected.** The free official data cannot
+draw them: data.gov.sg's MP19 Rail Line layer is 22MB of LineStrings whose only
+properties are `OBJECTID`, `GRND_LEVEL`, `RAIL_TYPE`, `INC_CRC`, `FMEL_UPD_D`
+and `SHAPE.LEN` — nothing says which line a segment belongs to, so the
+North-South line cannot be drawn in red. OneMap's 165 thematic layers contain
+no train-station theme at all, only rail projects under construction. Station
+*points* are available (MP19 Rail Station layer, 785KB, 219 named stations with
+MRT/LRT type) if "which station is this near" ever becomes a question worth
+answering. Do not re-attempt lines without new data.
 
 ## Geocoding
 
