@@ -25,6 +25,23 @@
   --radius: 14px;
   --gap: 12px;
 
+  /* Layering, in one place and in order. Every z-index in this file uses one
+     of these; a bare number anywhere else is a bug waiting to happen.
+
+     The map is the reason this list exists. Leaflet numbers its own panes from
+     100 to 1000, and `.leaflet-container` is `position: relative` with
+     `z-index: auto` - which does NOT create a stacking context - so those
+     panes competed directly with ours in the root context and a sheet at 20
+     was painted over by tiles at 400. The fix is to contain them (see .map),
+     not to out-number them: picking 1001 here would work until Leaflet
+     changed, and would leave the same trap for the next overlay. */
+  --z-map: 0;
+  --z-tabs: 5;
+  --z-safe-strip: 6;
+  --z-fab: 15;
+  --z-sheet: 20;
+  --z-viewer: 50;
+
   /* Overwritten from JS with Telegram's reported insets. The env() values are
      the browser's own device insets: the right answer outside Telegram, and a
      safe floor inside it if the SDK tells us nothing. */
@@ -91,7 +108,7 @@ body::before {
   height: var(--safe-top);
   background: var(--tg-bg);
   /* Above the sticky tabs, below the sheets and the photo viewer. */
-  z-index: 6;
+  z-index: var(--z-safe-strip);
   pointer-events: none;
 }
 
@@ -327,6 +344,16 @@ html.is-locked body {
 }
 
 .map {
+  /* Contains Leaflet's internal stacking entirely. `position: relative` is
+     already set by Leaflet, but with `z-index: auto` it forms no stacking
+     context; adding an explicit z-index does, and every pane and control
+     inside then paints as part of this one layer rather than as siblings of
+     the sheets. `isolation` states the same intent for anything that reads
+     this later - both are kept because the position/z-index pair is supported
+     everywhere, including whatever webview an older Android is carrying. */
+  position: relative;
+  z-index: var(--z-map);
+  isolation: isolate;
   height: 62vh;
   min-height: 280px;
   border: 1px solid var(--border);
@@ -436,7 +463,7 @@ html.is-locked body {
      does not move - so the tabs need the inset again or they would stick
      underneath Telegram's header once the list scrolls. */
   top: var(--safe-top);
-  z-index: 5;
+  z-index: var(--z-tabs);
   /* Opaque, and following the client's theme rather than a fixed colour, so
      the list scrolls behind the tabs instead of through them. */
   background: var(--tg-bg);
@@ -527,7 +554,7 @@ html.is-locked body {
   left: 50%;
   transform: translateX(-50%);
   bottom: calc(18px + var(--safe-bottom));
-  z-index: 15;
+  z-index: var(--z-fab);
   padding: 13px 24px;
   border: 0;
   border-radius: 999px;
@@ -1289,7 +1316,7 @@ html.is-locked body {
 .sheet {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: var(--z-sheet);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -1499,7 +1526,7 @@ html.is-locked body {
 .viewer {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: var(--z-viewer);
   /* A full-screen overlay with nothing to scroll: dragging it should do
      nothing at all, rather than moving the list underneath. */
   touch-action: none;

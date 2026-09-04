@@ -311,6 +311,22 @@ by real calls before building, because the alternative was assuming:
   `.leaflet-container .leaflet-control-attribution` (0,2,0), so overriding it
   needs the same scoping — load order cannot save a (0,1,0) selector, and the
   attribution sat white-on-white in dark mode until this was matched.
+
+- **Contain a third-party library's stacking; do not try to out-number it.**
+  Leaflet numbers its panes and controls from 100 to 1000, and
+  `.leaflet-container` is `position: relative` with `z-index: auto` — which
+  creates **no stacking context**, so those panes competed with ours in the
+  root context and tiles at 400 painted straight over a sheet at 20. The fix is
+  `position: relative; z-index: 0; isolation: isolate` on `.map`, which makes
+  every Leaflet layer paint as part of one contained layer. Raising the sheet
+  to 1001 would have worked until Leaflet changed a number, and would have left
+  the same trap for the next overlay. Every z-index in `style.css` now comes
+  from the `--z-*` scale defined at the top; a bare number is a bug.
+
+- **`elementsFromPoint` is not a layering test.** While diagnosing the above it
+  reported the sheet as topmost at a point where a screenshot plainly showed
+  the map covering it. Hit-testing and paint order can disagree; when checking
+  what is visually on top, look at the render.
 - **The map is created on first open, never at load.** Leaflet measures a
   hidden container as 0x0 and renders a grey box. Height is measured from the
   map's own top edge to the viewport bottom, so it survives the banner
