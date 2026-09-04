@@ -60,3 +60,6 @@ $RECYCLE.BIN/
 logs/
 *.log
 *.log.*
+
+# Working notes kept in the repo root but never committed.
+TECHNICAL.md
