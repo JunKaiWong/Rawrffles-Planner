@@ -29,6 +29,9 @@ that only ever suggests places you actually chose.
   reading of user screenshots for posts that can't be scraped
 - **Structured parsing** — one LLM call per link produces title, location,
   region, event dates, category, subcategory, and tags
+- **Plan for any day** — pick a date (defaults to the next Saturday); events
+  that have not opened or have already closed by that day are excluded, with
+  the reason shown
 - **Geocoding** — locations resolved to coordinates via OneMap. A lookup that
   fails is not silent: the entry is badged in the list and counted in the
   header, because an unplaceable entry is dropped from every plan and there is

@@ -167,6 +167,16 @@
   </div>
 
   <div class="actions">
+    <!--
+      Which day the plan is for. It drives the date filtering, not just the
+      label: an event that opens after this date is excluded, and one that
+      closes before it is too. Defaults to the next Saturday, which is what a
+      plan was always implicitly for.
+    -->
+    <label class="actions__date">
+      <span class="actions__date-label">For</span>
+      <input id="plan-date" class="actions__date-input" type="date" />
+    </label>
     <button id="plan-all-btn" class="btn btn--primary btn--sm" type="button">Plan with all</button>
     <button id="select-btn" class="btn btn--ghost btn--sm" type="button">Select</button>
     <!-- A place tried without a link: same row, same geocoding, same planner. -->

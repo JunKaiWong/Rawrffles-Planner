@@ -249,6 +249,7 @@ const els = {
   settingsSave: document.getElementById("settings-save"),
   settingsStatus: document.getElementById("settings-status"),
   planAllBtn: document.getElementById("plan-all-btn"),
+  planDate: document.getElementById("plan-date"),
   selectBtn: document.getElementById("select-btn"),
   planFab: document.getElementById("plan-selected-fab"),
   selectedCount: document.getElementById("selected-count"),
@@ -342,8 +343,11 @@ const fetchSettings = () => api("/settings");
 const putSettings = (body) => api("/settings", { method: "PUT", body: JSON.stringify(body) });
 // "Plan with all" means every eligible link is considered; the planner then
 // builds the most coherent day from them rather than cramming all of them in.
-const requestPlan = (linkIds) =>
-  api("/plan", { method: "POST", body: JSON.stringify({ link_ids: linkIds || null }) });
+const requestPlan = (linkIds, planFor) =>
+  api("/plan", {
+    method: "POST",
+    body: JSON.stringify({ link_ids: linkIds || null, plan_for: planFor || null }),
+  });
 const sendPlanToGroup = (planId) => api(`/plans/${planId}/post`, { method: "POST" });
 const patchLink = (id, changes) =>
   api(`/links/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
@@ -1616,6 +1620,34 @@ function closePlanSheet() {
   state.plan = null;
 }
 
+// The next Saturday, matching next_saturday() on the server so the field's
+// default and the server's default cannot disagree. Local time deliberately:
+// the couple pick a day in the calendar in front of them, not in UTC.
+function nextSaturdayISO() {
+  const d = new Date();
+  d.setDate(d.getDate() + ((6 - d.getDay()) % 7));
+  return toISODate(d);
+}
+
+function toISODate(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function planForValue() {
+  // An empty or half-typed field means "use the server's default" rather than
+  // an error: the value is a convenience, not a required argument.
+  const value = (els.planDate.value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+}
+
+function initPlanDate() {
+  els.planDate.value = nextSaturdayISO();
+  // Nothing can be planned for a day already gone; the picker says so rather
+  // than letting the request come back with everything excluded.
+  els.planDate.min = toISODate(new Date());
+}
+
 async function buildPlan(linkIds) {
   if (state.planning) return;
   state.planning = true;
@@ -1625,7 +1657,7 @@ async function buildPlan(linkIds) {
   button.textContent = "Planning…";
   setStatus("Building a plan… this takes a few seconds.", "info");
   try {
-    const plan = await requestPlan(linkIds);
+    const plan = await requestPlan(linkIds, planForValue());
     setStatus("");
     openPlanSheet(plan);
     if (state.selecting) setSelecting(false);
@@ -2263,6 +2295,7 @@ function applyTelegramTheme() {
 buildRatingButtons();
 setupDevBanner();
 applyTelegramTheme();
+initPlanDate();
 watchOverlays();
 armDiagnostics();
 loadVersion();

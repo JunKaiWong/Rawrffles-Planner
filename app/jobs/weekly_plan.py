@@ -26,8 +26,12 @@ logger = logging.getLogger(__name__)
 
 async def run(settings, today: date, dry_run: bool = False, store: bool = True) -> bool:
     rows = list_links(settings.db_path)
+    # The job runs on Friday for the Saturday after, so the day to filter
+    # against is that Saturday, not the day the job happens to run. Passing
+    # `today` here used to let in an event that closed on the Friday night.
+    saturday = next_saturday(today)
     plan = plan_date(
-        rows, settings.gemini_api_key, settings.gemini_model, today=today,
+        rows, settings.gemini_api_key, settings.gemini_model, plan_for=saturday,
         settings=settings,
     )
     if not plan.ok:
@@ -36,7 +40,6 @@ async def run(settings, today: date, dry_run: bool = False, store: bool = True) 
         logger.info("no plan to post: %s", plan.error)
         return False
 
-    saturday = next_saturday(today)
     body = plan.render()
     message = f"Plan for Saturday {saturday.isoformat()}:\n{body}"
     logger.info("plan for %s:\n%s", saturday, body)

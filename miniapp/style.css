@@ -389,8 +389,41 @@ html.is-locked body {
 .actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   padding: 0 16px 12px;
+}
+
+/* The day being planned for, sitting with the buttons that use it. */
+.actions__date {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--tg-secondary-bg);
+}
+
+.actions__date-label {
+  color: var(--tg-hint);
+  font-size: 13px;
+}
+
+.actions__date-input {
+  min-width: 0;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--tg-text);
+  font: inherit;
+  /* 16px, like every other input: iOS zooms a focused field below that and
+     never zooms back, which reads as a broken layout rather than as a zoom. */
+  font-size: 16px;
+}
+
+.actions__date-input:focus {
+  outline: none;
 }
 
 /* Floating action button for tap-to-select planning. Sits above the list and

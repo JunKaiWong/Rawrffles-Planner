@@ -524,6 +524,13 @@ class PlanRequest(BaseModel):
     link_ids: list[int] | None = Field(
         default=None, description="Selected link ids, or null for all eligible links"
     )
+    # The day being planned. Every date test - has this opened, has it closed -
+    # is made against this rather than against today, because a plan built on
+    # Monday for a Saturday must judge the Saturday.
+    plan_for: date | None = Field(
+        default=None,
+        description="Day to plan for (YYYY-MM-DD). Defaults to the next Saturday.",
+    )
     # Per-plan, not a preference: "put everything in this one", overriding the
     # configured stop limit for this request only.
     include_all: bool = Field(
@@ -1115,9 +1122,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         storing it here means posting it later needs only an id rather than
         trusting text sent back from the client.
         """
+        plan_for = payload.plan_for or next_saturday()
         logger.info(
-            "plan requested by user %s for %s",
+            "plan requested by user %s for %s, %s",
             user.id,
+            plan_for.isoformat(),
             f"{len(payload.link_ids)} selected link(s)" if payload.link_ids else "all eligible links",
         )
         rows = await asyncio.to_thread(list_links, settings.db_path)
@@ -1126,6 +1135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 rows,
                 settings.gemini_api_key,
                 settings.gemini_model,
+                plan_for=plan_for,
                 link_ids=payload.link_ids,
                 settings=settings,
                 include_all=payload.include_all,
@@ -1137,7 +1147,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail={"error": plan.error, "excluded": plan.excluded},
             )
 
-        week_of = next_saturday().isoformat()
+        # The day actually planned, not "whatever Saturday is next": a plan
+        # for a Tuesday in three weeks would otherwise be filed under the wrong
+        # date and read back as a plan for this weekend.
+        week_of = plan_for.isoformat()
         text = plan.render()
         plan_id = await asyncio.to_thread(save_plan, settings.db_path, week_of, text)
         return PlanOut(

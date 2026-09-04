@@ -24,7 +24,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -69,6 +69,7 @@ class Candidate:
     lat: float
     lng: float
     tier: str
+    event_start: str | None
     event_end: str | None
     rating: int | None
     # "saved" for a link the couple chose themselves, "discovered" for a real
@@ -139,19 +140,68 @@ class Plan:
         return "\n".join(lines)
 
 
-def urgency_tier(event_end: str | None, is_evergreen: bool, today: date) -> str | None:
-    """Tier for one link, or None when it has already expired.
+def next_saturday(today: date | None = None) -> date:
+    """The Saturday a plan defaults to. Today, if today is Saturday.
+
+    Lives here rather than in the handler because the planner itself needs it
+    as a default, and a service importing a handler would invert the dependency
+    direction the rest of the package keeps. `app.handlers.plan_handler`
+    re-exports it, so its existing callers are unaffected.
+    """
+    today = today or date.today()
+    return today + timedelta(days=(5 - today.weekday()) % 7)
+
+
+def _as_date(value: str | None) -> date | None:
+    """Parse a stored ISO date, or None if it is absent or malformed.
+
+    Never raises: a link with a nonsense date should fall through to being
+    treated as undated rather than taking a whole plan down.
+    """
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        logger.debug("ignoring unparseable date %r", value)
+        return None
+
+
+def format_day(value: str | None) -> str:
+    """A stored ISO date as "18 Sep", for saying why something was excluded."""
+    parsed = _as_date(value)
+    if parsed is None:
+        return "an unknown date"
+    # %-d is not portable to Windows, so the leading zero is stripped by hand.
+    return f"{parsed.day} {parsed.strftime('%b')}"
+
+
+def not_yet_started(event_start: str | None, plan_for: date) -> bool:
+    """True when an event has not opened by the day being planned.
+
+    The mirror of the expiry check, and it was missing: a plan for this
+    Saturday was being built around a market that opens a fortnight later,
+    which is discovered on the day, standing outside somewhere shut. An event
+    with no start date has always been running as far as we know, so it passes.
+    """
+    starts = _as_date(event_start)
+    return starts is not None and starts > plan_for
+
+
+def urgency_tier(event_end: str | None, is_evergreen: bool, plan_for: date) -> str | None:
+    """Tier for one link, or None when it has already ended by `plan_for`.
+
+    Measured against the day being planned rather than against today: an event
+    ending three days after the outing has three days of slack on the day that
+    matters, whether the plan was built this morning or a fortnight ago.
 
     Computed here rather than in the prompt: the model is inconsistent about
     date arithmetic and the result is hard to debug after the fact.
     """
-    if not event_end:
-        return TIER_FLEXIBLE if is_evergreen else TIER_FLEXIBLE
-    try:
-        ends = date.fromisoformat(event_end)
-    except (TypeError, ValueError):
+    ends = _as_date(event_end)
+    if ends is None:
         return TIER_FLEXIBLE
-    days = (ends - today).days
+    days = (ends - plan_for).days
     if days < 0:
         return None
     if days <= URGENT_DAYS:
@@ -162,11 +212,16 @@ def urgency_tier(event_end: str | None, is_evergreen: bool, today: date) -> str 
 
 
 def select_candidates(
-    rows, today: date | None = None, home_region: str | None = None
+    rows, plan_for: date | None = None, home_region: str | None = None
 ) -> list[Candidate]:
-    """Links that could appear in a plan today.
+    """Links that could appear in a plan for `plan_for`.
 
-    Excluded: anything done, anything expired, anything without coordinates
+    Every date test is against the day being planned, not against today. A plan
+    for next Saturday must not contain something that closes on Thursday, and
+    must not contain something that opens the Friday after.
+
+    Excluded: anything done, anything not yet open, anything expired,
+    anything without coordinates
     (it cannot be placed in a cluster), day trips, which are kept and browsable
     but are not an MRT stop away, and collections - a roundup of eight venues
     is not a stop, however useful it is to have saved.
@@ -181,11 +236,21 @@ def select_candidates(
     couple's settings, so changing it in the Mini App moves both this filter
     and the Day trips tab together.
     """
-    today = today or date.today()
+    plan_for = plan_for or next_saturday()
     candidates: list[Candidate] = []
     for row in rows:
         data = dict(row)
         if data.get("done"):
+            continue
+        # Before the coordinate check, so a market that simply has not opened
+        # yet is reported as such rather than as a geocoding problem.
+        if not_yet_started(data.get("event_start"), plan_for):
+            logger.debug(
+                "id=%s does not start until %s, excluded from a plan for %s",
+                data["id"],
+                data.get("event_start"),
+                plan_for.isoformat(),
+            )
             continue
         # Before the coordinate check, so the debug log says what this is
         # rather than that it could not be placed - it was never meant to be.
@@ -202,10 +267,15 @@ def select_candidates(
             )
             continue
         tier = urgency_tier(
-            data.get("event_end"), bool(data.get("is_evergreen")), today
+            data.get("event_end"), bool(data.get("is_evergreen")), plan_for
         )
         if tier is None:
-            logger.debug("id=%s expired on %s, excluded", data["id"], data.get("event_end"))
+            logger.debug(
+                "id=%s ended on %s, excluded from a plan for %s",
+                data["id"],
+                data.get("event_end"),
+                plan_for.isoformat(),
+            )
             continue
         candidates.append(
             Candidate(
@@ -219,6 +289,7 @@ def select_candidates(
                 lat=float(data["lat"]),
                 lng=float(data["lng"]),
                 tier=tier,
+                event_start=data.get("event_start"),
                 event_end=data.get("event_end"),
                 rating=data.get("rating"),
             )
@@ -289,9 +360,10 @@ def _shortlist(cluster: list[Candidate], max_stops: int = MAX_STOPS) -> list[Can
 
 
 PROMPT_TEMPLATE = """\
-You are arranging a Saturday outing for a couple in Singapore.
+You are arranging a day out for a couple in Singapore.
 
-Today is {today}.
+The outing is on {plan_for}. Everything below is open on that day; the dates
+were checked before you were asked.
 
 Below is a shortlist of places they have already saved. The shortlist has
 ALREADY been checked: every place is real, currently valid, and close enough to
@@ -535,6 +607,9 @@ def find_gap_fillers(
                     lat=place.lat,
                     lng=place.lng,
                     tier=TIER_FLEXIBLE,
+                    # A venue rather than an event: it is open now and has no
+                    # run of dates to fall outside.
+                    event_start=None,
                     event_end=None,
                     rating=None,
                     source="discovered",
@@ -567,10 +642,15 @@ def _explain_exclusions(
     rows,
     chosen: set[int],
     usable: set[int],
-    today: date,
+    plan_for: date,
     home_region: str | None = None,
 ) -> dict[int, str]:
-    """Why a explicitly chosen link did not make it into the plan."""
+    """Why an explicitly chosen link did not make it into the plan.
+
+    The order of these branches is the order of the checks in
+    select_candidates, so the reason given is the one that actually applied
+    rather than whichever test happened to be written first here.
+    """
     reasons: dict[int, str] = {}
     for row in rows:
         data = dict(row)
@@ -587,10 +667,14 @@ def _explain_exclusions(
         # the honest reason is where it is, not that the lookup was skipped.
         elif is_day_trip(data.get("region"), home_region):
             reasons[link_id] = f"a day trip ({data.get('region')}), not a local outing"
+        # Before coordinates, matching select_candidates: something that has
+        # not opened yet is not a geocoding failure.
+        elif not_yet_started(data.get("event_start"), plan_for):
+            reasons[link_id] = f"doesn't start until {format_day(data.get('event_start'))}"
         elif data.get("lat") is None:
             reasons[link_id] = f"no coordinates ({data.get('geocode_status') or 'not geocoded'})"
-        elif urgency_tier(data.get("event_end"), bool(data.get("is_evergreen")), today) is None:
-            reasons[link_id] = "expired"
+        elif urgency_tier(data.get("event_end"), bool(data.get("is_evergreen")), plan_for) is None:
+            reasons[link_id] = f"ended on {format_day(data.get('event_end'))}"
         else:
             reasons[link_id] = "not eligible"
     return reasons
@@ -600,7 +684,7 @@ def plan_date(
     rows,
     api_key: str,
     model_name: str,
-    today: date | None = None,
+    plan_for: date | None = None,
     radius_metres: int | None = None,
     link_ids: list[int] | None = None,
     settings=None,
@@ -618,8 +702,13 @@ def plan_date(
     everything eligible in this one plan" and overrides the configured stop
     limit. An unrealistically long result is flagged, not refused - the caller
     asked for it deliberately.
+
+    `plan_for` is the day being planned, and every date test is made against
+    it rather than against today: an event that opens the week after the outing
+    is as unusable as one that closed the week before. It defaults to the next
+    Saturday, which is what the plan has always been for.
     """
-    today = today or date.today()
+    plan_for = plan_for or next_saturday()
 
     # How many stops, and how wide a cluster, are settings the couple can
     # change from the Mini App, so they are read rather than compiled in.
@@ -641,12 +730,12 @@ def plan_date(
 
     warnings: list[str] = []
 
-    candidates = select_candidates(rows, today, home_region)
+    candidates = select_candidates(rows, plan_for, home_region)
     if link_ids:
         chosen = {int(i) for i in link_ids}
         usable = [c for c in candidates if c.id in chosen]
         excluded = _explain_exclusions(
-            rows, chosen, {c.id for c in usable}, today, home_region
+            rows, chosen, {c.id for c in usable}, plan_for, home_region
         )
         if not usable:
             return Plan(
@@ -710,7 +799,10 @@ def plan_date(
         return Plan(ok=False, error="GEMINI_API_KEY is not configured", excluded=excluded)
 
     prompt = PROMPT_TEMPLATE.format(
-        today=today.isoformat(),
+        # Spelled out rather than ISO: the model reads "Saturday" as a fact
+        # about the day, which an 8601 string leaves it to derive. %-d is not
+        # portable to Windows, so the day number is interpolated directly.
+        plan_for=f"{plan_for:%A} {plan_for.day} {plan_for:%B %Y}",
         places="\n".join(_describe_place(c) for c in shortlist),
         stop_count_rule=(
             # include_all is an explicit "everything, please", so the usual

@@ -270,16 +270,24 @@ failure; one silently hidden is not.
 
 `event_start` / `event_end` nullable; `is_evergreen` true when there's no expiry.
 
+**Every date test is against the day being planned, not against today.**
+`plan_date(plan_for=...)` takes the day, defaulting to the next Saturday, and
+the Mini App offers a picker so a plan can be built for any date. A plan for
+Saturday must exclude both what closed on Thursday *and* what opens the week
+after — the second half was missing, so a plan for 5 September was built around
+a market opening on the 18th. Excluded links say which: "doesn't start until
+18 Sep".
+
 **Priority scoring happens in code, not in the prompt:**
-- ends within 7 days → `urgent`
+- ends within 7 days of the plan date → `urgent`
 - ends within 30 days → `soon`
 - evergreen → `flexible`
 
 Pass the sorted, tiered list to the model and tell it to build around urgent
 items. Never ask the LLM to prioritise — inconsistent and hard to debug.
 
-Expired links are filtered from planning input and dimmed in the Mini App, not
-deleted.
+Expired links, and ones that have not opened yet, are filtered from planning
+input rather than deleted; expired ones are dimmed in the Mini App.
 
 ## Geocoding
 
